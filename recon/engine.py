@@ -395,9 +395,10 @@ def open_item_reconciles(provider, side, key, amount, currency, day: DayData):
     key = (key or "").strip()
     a = amt_key(num(amount))
     if side == "transfer":
-        # a pending internal transfer clears when the destination bank finally
-        # shows a credit for the amount
-        return _build_credit_pools(day).get(provider, {}).get(a, 0) > 0
+        # a pending internal transfer clears when the credit for the amount
+        # finally posts in any destination bank
+        pools = _build_credit_pools(day)
+        return any(pool.get(a, 0) > 0 for pool in pools.values())
     if side == "internal":
         # has the PROVIDER now reported this internal item?
         if provider == "NBF":
@@ -723,9 +724,9 @@ def reconcile(run_date: _dt.date, day_map: dict, lookback_days: int = 10,
     for t in transfers:
         if t["Status"] not in ("Credit pending", "Debit pending"):
             continue
-        dest = t["Destination"] if t["Destination"] not in ("", "?") else t["Source"]
+        # label by the SOURCE provider (where the transfer was generated)
         exceptions.append(Record(
-            dest, "transfer", "exception",
+            t["Source"], "transfer", "exception",
             provider_ref=t["Ref"], amount_provider=num(t["Amount"]),
             currency=t["Currency"], method=f"Internal transfer — {t['Status'].lower()}",
             description=(f"Internal transfer {t['Source']} → {t['Destination']} "
