@@ -72,6 +72,67 @@ def write_xlsx(result: dict, path: Path):
     wb.save(path)
 
 
+def write_daily_snapshot(result: dict, lsum: dict, path: Path):
+    """Dated record for the date folder: recon summary + the open-exceptions
+    state as of this run + what was newly opened and cleared today."""
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill
+    from .ledger import OPEN_COLS, CLEARED_COLS
+
+    wb = openpyxl.Workbook()
+    hf = Font(bold=True, color="FFFFFF")
+    fill = PatternFill("solid", fgColor="3A4A3F")
+
+    summ = wb.active
+    summ.title = "Summary"
+    for label, val in [
+        ("Recon Daily — run date", result["run_date"]),
+        ("Look-back window (days)", result["lookback_days"]),
+        ("Prior days available", ", ".join(result["prior_dates"]) or "none"),
+        ("", ""),
+        ("Internal rows (today)", result["internal_count"]),
+        ("Matched (same day)", len(result["matched"])),
+        ("Cleared vs prior day (timing)", len(result["cleared"])),
+        ("New exceptions opened today", lsum["new_today"]),
+        ("Exceptions cleared today", lsum["cleared_today"]),
+        ("Open exceptions (total)", lsum["open_total"]),
+        ("  of which Manual Review (>%dd)" % result["lookback_days"], lsum["open_manual"]),
+    ]:
+        summ.append([label, val])
+    summ.append([])
+    hdr_row = summ.max_row + 1
+    summ.append(["Provider", "Matched", "Cleared", "Exceptions", "Total"])
+    for c in summ[hdr_row]:
+        c.font = hf
+        c.fill = fill
+    for p in result["per_provider"]:
+        summ.append([p["provider"], p["matched"], p["cleared"], p["exceptions"],
+                     p["matched"] + p["cleared"] + p["exceptions"]])
+    summ.column_dimensions["A"].width = 34
+    for col in "BCDE":
+        summ.column_dimensions[col].width = 14
+
+    def sheet(title, cols, rows):
+        ws = wb.create_sheet(title)
+        ws.append(cols)
+        for c in ws[1]:
+            c.font = hf
+            c.fill = fill
+        for row in rows:
+            ws.append([row.get(c, "") for c in cols])
+        ws.freeze_panes = "A2"
+        for i, col in enumerate(cols, 1):
+            lens = [len(col)] + [len(str(row.get(col, ""))) for row in rows]
+            ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = min(max(lens) + 3, 60)
+
+    sheet("Open Exceptions", OPEN_COLS, lsum["open_rows"])
+    sheet("New Today", OPEN_COLS, lsum["new_today_rows"])
+    sheet("Cleared Today", CLEARED_COLS, lsum["cleared_today_rows"])
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    wb.save(path)
+
+
 # ---------------------------------------------------------------------------
 # HTML dashboard — self-contained, styled to match the browser tool
 # ---------------------------------------------------------------------------
@@ -141,7 +202,17 @@ def _rows(records, cols):
     return "".join(out)
 
 
-def write_html(result: dict, path: Path):
+def _dict_rows(rows, cols):
+    if not rows:
+        return f'<tr><td colspan="{len(cols)}" class="empty">Nothing here.</td></tr>'
+    out = []
+    for d in rows:
+        cells = "".join(f'<td class="{cls}">{_esc(d.get(c, ""))}</td>' for c, cls in cols)
+        out.append("<tr>" + cells + "</tr>")
+    return "".join(out)
+
+
+def write_html(result: dict, path: Path, lsum: dict = None):
     exc, cle, mat = result["exceptions"], result["cleared"], result["matched"]
     rate = (round(100 * len(mat) / result["internal_count"])
             if result["internal_count"] else 0)
@@ -164,9 +235,58 @@ def write_html(result: dict, path: Path):
                 ("Amount (Internal)", "num"), ("Amount (Provider)", "num"), ("Difference", "num"),
                 ("Currency", ""), ("Method", "method")]
 
+    open_cols = [("Provider", ""), ("Side", ""), ("Internal Ref", ""), ("Provider Ref", ""),
+                 ("First Seen", ""), ("Days Open", "num"), ("Amount", "num"), ("Currency", ""),
+                 ("Status", ""), ("Description", "desc")]
+    clr_cols = [("Provider", ""), ("Side", ""), ("Provider Ref", ""), ("First Seen", ""),
+                ("Cleared Date", ""), ("Days To Clear", "num"), ("Amount", "num"),
+                ("Currency", ""), ("Cleared Against", "")]
+
     def thead(cols):
         return "<tr>" + "".join(
             f'<th class="{cls}">{_esc(c)}</th>' for c, cls in cols) + "</tr>"
+
+    # ledger-aware cards + tabs (when a ledger summary is supplied)
+    if lsum is not None:
+        cards = (
+            f'<div class="card matched"><div class="lbl">Matched today</div><div class="val">{len(mat)}</div></div>'
+            f'<div class="card cleared"><div class="lbl">Cleared today</div><div class="val">{lsum["cleared_today"]}</div></div>'
+            f'<div class="card"><div class="lbl">New exceptions</div><div class="val">{lsum["new_today"]}</div></div>'
+            f'<div class="card exceptions"><div class="lbl">Open (total)</div><div class="val">{lsum["open_total"]}</div></div>'
+            f'<div class="card exceptions"><div class="lbl">Manual review</div><div class="val">{lsum["open_manual"]}</div></div>')
+        manual_rows = [r for r in lsum["open_rows"] if r.get("Status") == "Manual Review"]
+        tabs = (
+            f'<div class="tab active" data-tab="open">Open exceptions <span class="count">{lsum["open_total"]}</span></div>'
+            f'<div class="tab" data-tab="manual">Manual review <span class="count">{len(manual_rows)}</span></div>'
+            f'<div class="tab" data-tab="clr">Cleared today <span class="count">{lsum["cleared_today"]}</span></div>'
+            f'<div class="tab" data-tab="mat">Matched today <span class="count">{len(mat)}</span></div>')
+        panels = (
+            f'<div class="panel active" id="panel-open"><div class="tablewrap"><table>'
+            f'<thead>{thead(open_cols)}</thead><tbody>{_dict_rows(lsum["open_rows"], open_cols)}</tbody></table></div></div>'
+            f'<div class="panel" id="panel-manual"><div class="tablewrap"><table>'
+            f'<thead>{thead(open_cols)}</thead><tbody>{_dict_rows(manual_rows, open_cols)}</tbody></table></div></div>'
+            f'<div class="panel" id="panel-clr"><div class="tablewrap"><table>'
+            f'<thead>{thead(clr_cols)}</thead><tbody>{_dict_rows(lsum["cleared_today_rows"], clr_cols)}</tbody></table></div></div>'
+            f'<div class="panel" id="panel-mat"><div class="tablewrap"><table>'
+            f'<thead>{thead(mat_cols)}</thead><tbody>{_rows(mat, mat_cols)}</tbody></table></div></div>')
+    else:
+        cards = (
+            f'<div class="card"><div class="lbl">Internal rows</div><div class="val">{result["internal_count"]}</div></div>'
+            f'<div class="card matched"><div class="lbl">Matched</div><div class="val">{len(mat)}</div></div>'
+            f'<div class="card cleared"><div class="lbl">Cleared (aged)</div><div class="val">{len(cle)}</div></div>'
+            f'<div class="card exceptions"><div class="lbl">Exceptions</div><div class="val">{len(exc)}</div></div>'
+            f'<div class="card"><div class="lbl">Match rate</div><div class="val">{rate}%</div></div>')
+        tabs = (
+            f'<div class="tab active" data-tab="exc">Exceptions <span class="count">{len(exc)}</span></div>'
+            f'<div class="tab" data-tab="cle">Cleared <span class="count">{len(cle)}</span></div>'
+            f'<div class="tab" data-tab="mat">Matched <span class="count">{len(mat)}</span></div>')
+        panels = (
+            f'<div class="panel active" id="panel-exc"><div class="tablewrap"><table>'
+            f'<thead>{thead(exc_cols)}</thead><tbody>{_rows(exc, exc_cols)}</tbody></table></div></div>'
+            f'<div class="panel" id="panel-cle"><div class="tablewrap"><table>'
+            f'<thead>{thead(cle_cols)}</thead><tbody>{_rows(cle, cle_cols)}</tbody></table></div></div>'
+            f'<div class="panel" id="panel-mat"><div class="tablewrap"><table>'
+            f'<thead>{thead(mat_cols)}</thead><tbody>{_rows(mat, mat_cols)}</tbody></table></div></div>')
 
     prior = ", ".join(result["prior_dates"]) or "none available"
     doc = f"""<!DOCTYPE html>
@@ -182,36 +302,20 @@ def write_html(result: dict, path: Path):
       <span class="lbl" style="margin-top:8px">Look-back</span>{result['lookback_days']} days</div>
   </header>
 
-  <div class="sumgrid">
-    <div class="card"><div class="lbl">Internal rows</div><div class="val">{result['internal_count']}</div></div>
-    <div class="card matched"><div class="lbl">Matched</div><div class="val">{len(mat)}</div></div>
-    <div class="card cleared"><div class="lbl">Cleared (aged)</div><div class="val">{len(cle)}</div></div>
-    <div class="card exceptions"><div class="lbl">Exceptions</div><div class="val">{len(exc)}</div></div>
-    <div class="card"><div class="lbl">Match rate</div><div class="val">{rate}%</div></div>
-  </div>
+  <div class="sumgrid">{cards}</div>
 
-  <h3>By provider</h3>
+  <h3>By provider (today)</h3>
   <table><thead><tr><th>Provider</th><th class="num">Matched</th><th class="num">Cleared</th>
     <th class="num">Exceptions</th><th class="num">Total</th><th>Status</th></tr></thead>
     <tbody>{prov_rows}</tbody></table>
 
-  <div class="tabs">
-    <div class="tab active" data-tab="exc">Exceptions <span class="count">{len(exc)}</span></div>
-    <div class="tab" data-tab="cle">Cleared <span class="count">{len(cle)}</span></div>
-    <div class="tab" data-tab="mat">Matched <span class="count">{len(mat)}</span></div>
-  </div>
-  <div class="panel active" id="panel-exc"><div class="tablewrap"><table>
-    <thead>{thead(exc_cols)}</thead><tbody>{_rows(exc, exc_cols)}</tbody></table></div></div>
-  <div class="panel" id="panel-cle"><div class="tablewrap"><table>
-    <thead>{thead(cle_cols)}</thead><tbody>{_rows(cle, cle_cols)}</tbody></table></div></div>
-  <div class="panel" id="panel-mat"><div class="tablewrap"><table>
-    <thead>{thead(mat_cols)}</thead><tbody>{_rows(mat, mat_cols)}</tbody></table></div></div>
+  <div class="tabs">{tabs}</div>
+  {panels}
 
   <div class="foot">
     Prior days used for aging: {_esc(prior)}.<br>
-    Matched = reconciled against the same day. Cleared = a break that reconciled against a prior day
-    within the look-back window (timing difference). Exceptions = unmatched on the run date and across
-    the look-back window &mdash; needs manual checking.<br>
+    Open exceptions carry forward across days and clear automatically when the counterparty reports them
+    within {result['lookback_days']} days; still open beyond that &rarr; <b>Manual review</b>.<br>
     Fee rows (Debit_FEE_VAT, Debit_FEE_REMITTANCE_FEE) excluded.
   </div>
 </div>

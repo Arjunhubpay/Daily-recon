@@ -374,6 +374,49 @@ def provider_row_has_internal(provider: str, prow: dict, day: DayData):
     return False
 
 
+def open_item_reconciles(provider, side, key, amount, currency, day: DayData):
+    """Re-test a carried-forward open exception against a later day's data:
+    has the counterparty since reported it? `key` is the item's matching key
+    (provider_ref recorded when the exception was opened)."""
+    key = (key or "").strip()
+    a = amt_key(num(amount))
+    if side == "internal":
+        # has the PROVIDER now reported this internal item?
+        if provider == "NBF":
+            return bool(day.nbf_idx.get(key))
+        if provider == "Currency Cloud":
+            if day.cc_by_ref.get(key):
+                return True
+            return any(amt_key(num(r.get("Amount"))) == a and r.get("Currency") == currency
+                       for r in day.cc_rows)
+        if provider == "Corpay":
+            return key in day.cp_all
+        if provider == "Zand":
+            if day.zand_idx.get(key):
+                return True
+            return any(amt_key(r["amt"]) == a
+                       for lst in day.zand_idx.values() for r in lst)
+        return False
+    else:
+        # provider-side: has the INTERNAL ledger now recorded this item?
+        keys, amts = internal_match_keys(provider, day)
+        if key and key in keys:
+            return True
+        if provider in ("Currency Cloud", "Zand") and a is not None:
+            cur = currency if provider == "Currency Cloud" else ""
+            return (a, cur) in amts
+        return False
+
+
+def reconciles_in_window(provider, side, key, amount, currency, day_map, dates):
+    """True if the open item reconciles in ANY of the given days (tolerates
+    skipped runs, e.g. weekends). Returns the first matching date, or None."""
+    for d in dates:
+        if d in day_map and open_item_reconciles(provider, side, key, amount, currency, day_map[d]):
+            return d
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Result records
 # ---------------------------------------------------------------------------

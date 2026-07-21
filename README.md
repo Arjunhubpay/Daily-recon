@@ -3,30 +3,39 @@
 Aged daily reconciliation of the internal ledger (`recon-lines`) against the
 provider statements — **NBF, Currency Cloud, Corpay, Zand**.
 
-Each run does a same-day reconciliation, then **ages** any break against the
-previous *N* days of files (default 10). The result is split three ways:
-
-| Bucket | Meaning |
-| --- | --- |
-| **Matched** | Reconciled against the **same day's** data. |
-| **Cleared** | Was a same-day break, but reconciles against a **prior day** within the look-back window — a timing difference. Stamped with the earlier date it matched against. |
-| **Exception** | Not present on **either side** across the run date *and* the whole look-back window. **Needs manual checking.** |
-
 Matching is **two-sided**: an internal line missing from the provider statement
 *and* a provider line missing from the internal ledger are both reported.
 
-Artefacts written per run (to the `Output` sub-folder if one exists, else
-`_recon_reports`):
-- `Recon_Results.xlsx` — latest run, columns matching the existing report
-  (`Run Date, Provider, Internal Ref, Provider Ref, Value Date,
-  Amount (Internal), Amount (Provider), Difference, …`) across
-  Summary / Exceptions / Cleared / Matched sheets.
-- `dashboard_latest.html` — self-contained dashboard for the latest run.
-- `<date>/recon_report_<date>.xlsx` and `<date>/dashboard_<date>.html` — dated archive copies.
+## Rolling exceptions ledger
 
-`Difference` compares **magnitudes** (providers store signed amounts, the
-internal ledger stores magnitudes), so a matched pair with equal value shows
-`0.00`; a non-zero value is a genuine amount discrepancy worth reviewing.
+There is **one master file, `Open_Exceptions.xlsx`, that is carried forward
+and updated every run** — it is always the live list of what is currently
+outstanding. Each day:
+
+1. Every currently-open item is **re-checked** against the recent window. If
+   the counterparty has since reported it, the item is **cleared** — it moves
+   to the `Cleared Log` sheet (stamped with its original *First Seen* date and
+   *Days To Clear*) and drops off the open list.
+2. Today's **new** breaks (unreconciled even after looking back over the window)
+   are **added** as open, dated *First Seen = today*.
+3. An item still open **beyond the look-back window (default 10 days)** is
+   flagged **`Manual Review`** — a genuine break, not a timing difference.
+
+So: a break you see today automatically disappears from the open list the day
+it reconciles; only real, aged breaks remain flagged for manual work.
+
+## Outputs
+
+- **`Output/Open_Exceptions.xlsx`** — the rolling master file. Sheets:
+  `Open Exceptions` (live outstanding list) and `Cleared Log` (audit trail).
+- **`<date>/Recon_Summary_<date>.xlsx`** — a dated snapshot written into that
+  day's folder: recon summary, `Open Exceptions` as of that day, `New Today`
+  and `Cleared Today`. Columns follow the existing report schema
+  (`Provider, Internal Ref, Provider Ref, Amount, …`).
+- **`<date>/dashboard_<date>.html`** and **`Output/dashboard_latest.html`** —
+  self-contained dashboards (open / manual-review / cleared-today / matched).
+
+(Output goes to the `Output` sub-folder if it exists, else `_recon_reports`.)
 
 ---
 
@@ -123,5 +132,7 @@ Fee rows (`Debit_FEE_VAT`, `Debit_FEE_REMITTANCE_FEE`) are excluded.
 ## Test
 
 ```bash
-python tests/test_engine.py        # or: python -m pytest tests/
+python tests/test_engine.py        # matching rules + look-back
+python tests/test_ledger.py        # cross-run carry-forward / clearing / manual-review
+# or: python -m pytest tests/
 ```

@@ -30,8 +30,9 @@ import datetime as _dt
 import sys
 from pathlib import Path
 
+from . import ledger
 from .engine import load_day, reconcile
-from .report import write_html, write_xlsx
+from .report import write_daily_snapshot, write_html
 
 DATA_EXTS = (".csv", ".xlsx", ".xls")
 
@@ -93,34 +94,37 @@ def main(argv=None):
 
     result = reconcile(run_date, day_map, args.lookback)
 
-    out_dir = out_root / run_date.isoformat()
-    xlsx_path = out_dir / f"recon_report_{run_date.isoformat()}.xlsx"
-    html_path = out_dir / f"dashboard_{run_date.isoformat()}.html"
-    write_xlsx(result, xlsx_path)
-    write_html(result, html_path)
-    # stable drop-in outputs at the output root (overwritten each run)
-    write_xlsx(result, out_root / "Recon_Results.xlsx")
-    write_html(result, out_root / "dashboard_latest.html")
+    # --- rolling open-exceptions ledger (carried forward across runs) --------
+    master = out_root / "Open_Exceptions.xlsx"
+    open_map, cleared = ledger.load(master)
+    lsum = ledger.update(run_date, day_map, args.lookback, result, open_map, cleared)
+    ledger.save(master, open_map, cleared)
+
+    # --- dated record in the date folder + viewable dashboard ----------------
+    date_folder = _day_folder(root, run_date)
+    snapshot = date_folder / f"Recon_Summary_{run_date.isoformat()}.xlsx"
+    dated_html = date_folder / f"dashboard_{run_date.isoformat()}.html"
+    write_daily_snapshot(result, lsum, snapshot)
+    write_html(result, dated_html, lsum)
+    # stable "latest" dashboard at the output root
+    write_html(result, out_root / "dashboard_latest.html", lsum)
 
     if not args.quiet:
-        _print_summary(result, xlsx_path, html_path)
+        _print_summary(result, lsum, master, snapshot)
     return 0
 
 
-def _print_summary(result, xlsx_path, html_path):
+def _print_summary(result, lsum, master, snapshot):
     print(f"\nRecon Daily — {result['run_date']}  (look-back {result['lookback_days']}d)")
-    print(f"  prior days used : {', '.join(result['prior_dates']) or 'none'}")
-    print(f"  internal rows   : {result['internal_count']}")
-    print(f"  matched         : {len(result['matched'])}")
-    print(f"  cleared (aged)  : {len(result['cleared'])}")
-    print(f"  exceptions      : {len(result['exceptions'])}")
-    print(f"  {'provider':<16}{'match':>7}{'clear':>7}{'excep':>7}")
-    for p in result["per_provider"]:
-        print(f"  {p['provider']:<16}{p['matched']:>7}{p['cleared']:>7}{p['exceptions']:>7}")
-    print(f"\n  report    : {xlsx_path}")
-    print(f"  dashboard : {html_path}")
-    if result["exceptions"]:
-        print(f"\n  {len(result['exceptions'])} exception(s) need manual checking.")
+    print(f"  prior days used   : {', '.join(result['prior_dates']) or 'none'}")
+    print(f"  internal rows     : {result['internal_count']}")
+    print(f"  matched (same day): {len(result['matched'])}")
+    print(f"  cleared vs prior  : {len(result['cleared'])}")
+    print(f"  new exceptions    : {lsum['new_today']}")
+    print(f"  cleared today     : {lsum['cleared_today']}")
+    print(f"  OPEN (total)      : {lsum['open_total']}  (manual review: {lsum['open_manual']})")
+    print(f"\n  open ledger : {master}")
+    print(f"  dated file  : {snapshot}")
 
 
 if __name__ == "__main__":
