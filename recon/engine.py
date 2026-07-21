@@ -178,6 +178,10 @@ class DayData:
     nbf_idx: dict = field(default_factory=dict)      # FT -> count
     zand_idx: dict = field(default_factory=dict)     # outgoing id -> [{amt}]
     files: list = field(default_factory=list)        # (name, kind) seen
+    # raw statement rows kept for internal-transfer detection / credit checks
+    nbf_rows: list = field(default_factory=list)     # {desc, debit, credit}
+    zand_rows: list = field(default_factory=list)    # {oid, details, credit, debit}
+    corpay_pay_rows: list = field(default_factory=list)  # full PaymentHistory rows
 
     @property
     def cp_all(self):
@@ -225,6 +229,8 @@ def load_day(date: _dt.date, file_paths) -> DayData:
     day.cp_pay = corpay_index("PaymentHistory", "Amount", False)
     day.cp_setl = corpay_index("SettlementReport", "Settlement Amount", True)
     day.cp_fx = corpay_index("DealHistory", "Purchased", False)
+    for p in pick("PaymentHistory"):
+        day.corpay_pay_rows.extend(to_objects(read_rows(p), 0))
 
     # nbf — header on row index 7; find the Description column
     for p in pick("OpTransactionHistory"):
@@ -232,10 +238,14 @@ def load_day(date: _dt.date, file_paths) -> DayData:
         if not rows:
             continue
         desc_key = next((k for k in rows[0].keys() if "Description" in k), "")
+        dr_key = next((k for k in rows[0].keys() if "Debit" in k), "")
+        cr_key = next((k for k in rows[0].keys() if "Credit" in k), "")
         for r in rows:
             desc = r.get(desc_key, "") if desc_key else ""
             if "computer generated" in desc.lower():
                 continue
+            day.nbf_rows.append({"desc": desc, "debit": num(r.get(dr_key)),
+                                 "credit": num(r.get(cr_key))})
             ft = extract_ft(desc)
             if ft:
                 day.nbf_idx[ft] = day.nbf_idx.get(ft, 0) + 1
@@ -243,6 +253,10 @@ def load_day(date: _dt.date, file_paths) -> DayData:
     # zand
     for p in pick("downloaded-statement"):
         for r in to_objects(read_rows(p), 0):
+            details = next((r[k] for k in r if k.startswith("Details")), "")
+            day.zand_rows.append({"oid": (r.get("Outgoing Id") or "").strip(),
+                                  "details": details,
+                                  "credit": num(r.get("Credit")), "debit": num(r.get("Debit"))})
             oid = (r.get("Outgoing Id") or "").strip()
             if not oid:
                 continue
@@ -409,140 +423,132 @@ def open_item_reconciles(provider, side, key, amount, currency, day: DayData):
 
 
 # ---------------------------------------------------------------------------
-# Internal transfers (intra-Hubpay: a debit from one own account + a credit to
-# another). Runs alongside the normal recon (legs are NOT removed from it) and
-# is surfaced separately. A leg is internal when it carries one of the
-# configured tags OR its counterparty is one of Hubpay's own accounts. Legs are
-# paired within a provider (shared Ref for Account Owner) and then across
-# providers (amount + currency + value date); an unpaired leg is a transfer
-# whose other side has not posted yet.
+# Internal transfers (intra-Hubpay: money moving between two own accounts).
+# Detected from the PROVIDER STATEMENTS, because a leg is often not tagged in
+# the internal ledger (e.g. a Corpay "own account transfer" only shows its
+# INTERCOMPANY nature in the Corpay file). For each OUTGOING internal leg we
+# verify the CREDIT actually posted in the destination bank's statement; if it
+# has not, the transfer is flagged "Credit pending".
 # ---------------------------------------------------------------------------
-_UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
-                      r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
-
-
-def is_internal_leg(r: dict) -> bool:
-    from .accounts import has_internal_tag, find_account
-    fields = (r.get("Reference", ""), r.get("Supplementary Details", ""),
-              r.get("Ref for Account Owner", ""))
-    return has_internal_tag(*fields) or find_account(*fields) is not None
-
-
-def leg_direction(r: dict) -> str:
-    tt = (r.get("Transaction Type") or "").strip().lower()
-    if tt == "credit":
-        return "credit"
-    if tt == "debit":
-        return "debit"
-    return "other"
-
-
-def _pair_key(r: dict):
-    rfao = (r.get("Ref for Account Owner") or "").strip()
-    if _UUID_RE.match(rfao):
-        return rfao                       # Zand: both legs share this UUID
-    return strip_zand(r.get("Reference")) or rfao or (r.get("Reference") or "").strip()
-
-
-def _leg(provider, r):
+def _dest_provider(*texts):
     from .accounts import find_account
-    acct = find_account(r.get("Reference", ""), r.get("Supplementary Details", ""),
-                         r.get("Ref for Account Owner", ""))
-    return {
-        "provider": provider, "dir": leg_direction(r),
-        "amt": amt_key(num(r.get("Amount"))), "cur": (r.get("Currency") or ""),
-        "date": (r.get("Value Date") or ""), "ref": (r.get("Reference") or ""),
-        "key": _pair_key(r), "account": (acct[2] if acct else ""),
-        "note": (r.get("Supplementary Details") or r.get("Ref for Account Owner") or "")[:60],
-    }
+    acct = find_account(*texts)
+    if acct:
+        return acct[1]                       # provider owning the beneficiary account
+    t = " ".join(x for x in texts if x).lower()
+    if "nbf" in t or "national bank of fujairah" in t:
+        return "NBF"
+    if "currency cloud" in t or "gbp cc" in t or "- cc" in t or " cc " in t:
+        return "Currency Cloud"
+    if "corpay" in t or "cmfx" in t:
+        return "Corpay"
+    if "zand" in t:
+        return "Zand"
+    return ""
 
 
-def _mk_transfer(debit, credit, pairing):
-    row = debit or credit
-    if debit and credit:
-        status = ("Matched" if abs((debit["amt"] or 0) - (credit["amt"] or 0)) < 0.01
-                  else "Amount mismatch")
-    elif debit:
-        status = "Credit pending"
-    elif credit:
-        status = "Debit pending"
-    else:
-        status = "Unpaired leg"
-    return {
-        "Status": status,
-        "Amount": _fmt_amt((debit or credit)["amt"]),
-        "Currency": row["cur"],
-        "Value Date": row["date"],
-        "Debit Provider": debit["provider"] if debit else "",
-        "Credit Provider": credit["provider"] if credit else "",
-        "Debit Ref": debit["ref"] if debit else "",
-        "Credit Ref": credit["ref"] if credit else "",
-        "Account": (debit or credit)["account"] or (credit["account"] if credit else ""),
-        "Pairing": pairing,
-        "Note": row["note"],
-    }
+def _build_credit_pools(day: DayData):
+    """All incoming amounts per provider (regardless of whether the credit is
+    itself labelled internal) — used to confirm a transfer's credit posted."""
+    import collections
+    pools = collections.defaultdict(collections.Counter)
+    for r in day.nbf_rows:
+        if r["credit"] is not None:
+            pools["NBF"][amt_key(r["credit"])] += 1
+    for r in day.zand_rows:
+        if r["credit"] is not None:
+            pools["Zand"][amt_key(r["credit"])] += 1
+    for r in day.cc_rows:
+        a = amt_key(num(r.get("Amount")))
+        if a is not None:
+            pools["Currency Cloud"][abs(a)] += 1
+    for lst in day.cp_setl.values():
+        for x in lst:
+            if x.get("amt") is not None:
+                pools["Corpay"][amt_key(x["amt"])] += 1
+    return pools
 
 
 def internal_transfers(day: DayData):
-    """Return (transfers: [dict], summary: dict) for one day's internal ledger."""
-    legs = [_leg(p, r) for p, rows in day.internal.items() for r in rows
-            if is_internal_leg(r)]
+    """Return (transfers, summary). Outgoing internal legs are gathered from the
+    provider statements and each is confirmed against the destination bank's
+    credits; an unconfirmed one is 'Credit pending'."""
+    from .accounts import has_internal_tag, find_account, OWN_BANK_NAMES, FEE_PHRASES
 
+    def is_fee(t):
+        return any(p in t.lower() for p in FEE_PHRASES)
+
+    legs = []   # outgoing internal-transfer legs
+
+    # Corpay — payments whose beneficiary is an own account / intercompany
+    for r in day.corpay_pay_rows:
+        purpose = (r.get("Purpose Of Payment") or "").strip().upper()
+        ident, ben, ref = r.get("Identifier", ""), r.get("Beneficiary", ""), r.get("Reference", "")
+        internal = (purpose == "INTERCOMPANY PAYMENT" or has_internal_tag(ident, ben, ref)
+                    or find_account(ident, ben, ref) is not None)
+        if internal:
+            legs.append({"src": "Corpay", "dest": _dest_provider(ident, ben, ref),
+                         "amt": amt_key(num(r.get("Amount"))), "cur": (r.get("Currency") or ""),
+                         "ref": (r.get("Deal #") or "").strip(), "note": (ident or ref)[:55]})
+
+    # Zand — debit rows (money leaving) that are internal movements
+    for r in day.zand_rows:
+        det = r["details"]
+        if is_fee(det) or not r["debit"]:
+            continue
+        low = det.lower()
+        internal = (has_internal_tag(det) or find_account(det) is not None
+                    or ("transfer to " in low and any(b in low for b in OWN_BANK_NAMES)))
+        if internal:
+            legs.append({"src": "Zand", "dest": _dest_provider(det), "amt": amt_key(r["debit"]),
+                         "cur": "AED", "ref": r["oid"], "note": det[:55]})
+
+    # NBF — debit rows (money leaving) that are internal movements
+    for r in day.nbf_rows:
+        det = r["desc"]
+        if not r["debit"]:
+            continue
+        if "internal transf" in det.lower() or has_internal_tag(det) or find_account(det) is not None:
+            legs.append({"src": "NBF", "dest": _dest_provider(det), "amt": amt_key(r["debit"]),
+                         "cur": "AED", "ref": extract_ft(det) or "", "note": det[:55]})
+
+    # Currency Cloud — payments whose beneficiary is an own account
+    for r in day.cc_rows:
+        acct = find_account(r.get("Beneficiary IBAN", ""), r.get("Beneficiary account number", ""))
+        if acct:
+            a = amt_key(num(r.get("Amount")))
+            legs.append({"src": "Currency Cloud", "dest": acct[1],
+                         "amt": (abs(a) if a is not None else None),
+                         "cur": (r.get("Currency") or ""), "ref": (r.get("Reference") or "").strip(),
+                         "note": "beneficiary = own account"})
+
+    # confirm each outgoing leg against the destination bank's credits
+    pools = _build_credit_pools(day)
     transfers = []
-    used = [False] * len(legs)
-
-    # Pass 1 — same-provider pairing by the shared key (Zand debit+credit)
-    groups = {}
-    for i, L in enumerate(legs):
-        groups.setdefault(L["key"], []).append(i)
-    for idxs in groups.values():
-        debits = [i for i in idxs if legs[i]["dir"] == "debit"]
-        credits = [i for i in idxs if legs[i]["dir"] == "credit"]
-        for di, ci in zip(debits, credits):
-            transfers.append(_mk_transfer(legs[di], legs[ci], "same key"))
-            used[di] = used[ci] = True
-
-    # Pass 2 — cross-provider pairing by (amount, currency, value date)
-    def free(pred):
-        return [i for i, L in enumerate(legs) if not used[i] and pred(L)]
-
-    for di in free(lambda L: L["dir"] in ("debit", "other")):
-        if used[di]:
-            continue
-        d = legs[di]
-        for ci in free(lambda L: L["dir"] in ("credit", "other")):
-            if used[ci] or ci == di:
-                continue
-            c = legs[ci]
-            if (d["provider"] != c["provider"] and d["amt"] == c["amt"]
-                    and d["cur"] == c["cur"] and d["date"] == c["date"]):
-                transfers.append(_mk_transfer(d, c, "amount+date (cross-provider)"))
-                used[di] = used[ci] = True
+    for L in legs:
+        amt, dest = L["amt"], L["dest"]
+        candidates = [dest] if dest else list(pools.keys())
+        matched_in = None
+        for prov in candidates:
+            if prov and amt is not None and pools[prov].get(amt, 0) > 0:
+                pools[prov][amt] -= 1
+                matched_in = prov
                 break
+        transfers.append({
+            "Status": "Matched" if matched_in else "Credit pending",
+            "Amount": _fmt_amt(amt), "Currency": L["cur"],
+            "Source": L["src"], "Destination": dest or "?",
+            "Credit Found In": matched_in or "",
+            "Ref": L["ref"], "Note": L["note"],
+        })
 
-    # Pass 3 — leftovers are pending / unpaired legs
-    for i, L in enumerate(legs):
-        if used[i]:
-            continue
-        if L["dir"] == "debit":
-            transfers.append(_mk_transfer(L, None, "unpaired"))
-        elif L["dir"] == "credit":
-            transfers.append(_mk_transfer(None, L, "unpaired"))
-        else:
-            t = _mk_transfer(L, None, "unpaired")
-            t["Status"] = "Unpaired leg"
-            transfers.append(t)
-
-    order = {"Credit pending": 0, "Debit pending": 1, "Amount mismatch": 2,
-             "Unpaired leg": 3, "Matched": 4}
-    transfers.sort(key=lambda t: (order.get(t["Status"], 9), t["Debit Ref"], t["Credit Ref"]))
+    order = {"Credit pending": 0, "Matched": 1}
+    transfers.sort(key=lambda t: (order.get(t["Status"], 9), t["Source"], t["Ref"]))
     summary = {
         "total": len(transfers),
         "matched": sum(1 for t in transfers if t["Status"] == "Matched"),
         "credit_pending": sum(1 for t in transfers if t["Status"] == "Credit pending"),
-        "debit_pending": sum(1 for t in transfers if t["Status"] == "Debit pending"),
-        "amount_mismatch": sum(1 for t in transfers if t["Status"] == "Amount mismatch"),
-        "unpaired": sum(1 for t in transfers if t["Status"] == "Unpaired leg"),
+        "debit_pending": 0, "amount_mismatch": 0, "unpaired": 0,
     }
     return transfers, summary
 
