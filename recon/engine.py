@@ -413,18 +413,19 @@ def open_item_reconciles(provider, side, key, amount, currency, day: DayData):
 # another). Detected from the internal ledger markers; the two legs are paired
 # and a transfer whose credit leg has not posted yet is flagged.
 # ---------------------------------------------------------------------------
-INTERNAL_MARKERS = (
-    "internal transfer", "own account transfer", "own account",
-    "intercompany", "inter company", "inter group transfer", "fis-own account",
-)
+# Only the bank/system-generated transaction description (Supplementary
+# Details) is treated as authoritative. Free-text reference fields
+# (Reference / Ref for Account Owner) are NOT scanned — they carry
+# customer- or reference-entered text (e.g. an "Own Account Transfer" note on
+# an ordinary incoming customer credit) and produce false positives.
+INTERNAL_MARKERS = ("internal transfer", "intercompany", "inter company")
 _UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
                       r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 
 
 def is_internal_leg(r: dict) -> bool:
-    blob = " ".join([r.get("Reference", ""), r.get("Supplementary Details", ""),
-                     r.get("Ref for Account Owner", "")]).lower()
-    return any(m in blob for m in INTERNAL_MARKERS)
+    sd = (r.get("Supplementary Details") or "").lower()
+    return any(m in sd for m in INTERNAL_MARKERS)
 
 
 def leg_direction(r: dict) -> str:
