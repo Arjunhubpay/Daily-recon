@@ -77,7 +77,13 @@ def main(argv=None):
         ap.error(f"--root is not a folder: {root}")
 
     run_date = _parse_date(args.date) if args.date else _dt.date.today()
-    out_root = Path(args.out).expanduser() if args.out else (root / "_recon_reports")
+    # Default output to an existing "Output" folder if present, else _recon_reports.
+    if args.out:
+        out_root = Path(args.out).expanduser()
+    elif (root / "Output").is_dir():
+        out_root = root / "Output"
+    else:
+        out_root = root / "_recon_reports"
 
     day_map = collect_day_map(root, run_date, args.lookback)
     if run_date not in day_map:
@@ -92,9 +98,9 @@ def main(argv=None):
     html_path = out_dir / f"dashboard_{run_date.isoformat()}.html"
     write_xlsx(result, xlsx_path)
     write_html(result, html_path)
-    # a stable "latest" link at the output root
-    latest = out_root / "dashboard_latest.html"
-    write_html(result, latest)
+    # stable drop-in outputs at the output root (overwritten each run)
+    write_xlsx(result, out_root / "Recon_Results.xlsx")
+    write_html(result, out_root / "dashboard_latest.html")
 
     if not args.quiet:
         _print_summary(result, xlsx_path, html_path)

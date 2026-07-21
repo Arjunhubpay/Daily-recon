@@ -15,10 +15,18 @@ previous *N* days of files (default 10). The result is split three ways:
 Matching is **two-sided**: an internal line missing from the provider statement
 *and* a provider line missing from the internal ledger are both reported.
 
-Two artefacts are written per run:
-- `recon_report_<date>.xlsx` — Summary / Exceptions / Cleared / Matched sheets.
-- `dashboard_<date>.html` — a self-contained page you can open in any browser.
-- `dashboard_latest.html` — a copy of the most recent dashboard (stable link).
+Artefacts written per run (to the `Output` sub-folder if one exists, else
+`_recon_reports`):
+- `Recon_Results.xlsx` — latest run, columns matching the existing report
+  (`Run Date, Provider, Internal Ref, Provider Ref, Value Date,
+  Amount (Internal), Amount (Provider), Difference, …`) across
+  Summary / Exceptions / Cleared / Matched sheets.
+- `dashboard_latest.html` — self-contained dashboard for the latest run.
+- `<date>/recon_report_<date>.xlsx` and `<date>/dashboard_<date>.html` — dated archive copies.
+
+`Difference` compares **magnitudes** (providers store signed amounts, the
+internal ledger stores magnitudes), so a matched pair with equal value shows
+`0.00`; a non-zero value is a genuine amount discrepancy worth reviewing.
 
 ---
 

@@ -258,51 +258,54 @@ def load_day(date: _dt.date, file_paths) -> DayData:
 
 # ---------------------------------------------------------------------------
 # Matching — internal line  ->  a given day's provider index
-# Returns (matched: bool, provider_ref: str, method: str)
+# Returns (matched: bool, provider_ref: str, method: str, provider_amount)
+# provider_amount is the amount recorded on the provider side (None if the
+# provider index carries no amount, e.g. NBF), used for the Difference column.
 # ---------------------------------------------------------------------------
 def match_internal(provider: str, ir: dict, day: DayData):
     if provider == "NBF":
         ref = (ir.get("Reference") or "").strip()
         if day.nbf_idx.get(ref):
-            return True, ref, "FT code"
-        return False, ref, ""
+            return True, ref, "FT code", None
+        return False, ref, "", None
 
     if provider == "Currency Cloud":
         ref = (ir.get("Reference") or "").strip()
         if day.cc_by_ref.get(ref):
-            return True, ref, "Reference"
+            return True, ref, "Reference", amt_key(num(day.cc_by_ref[ref][0].get("Amount")))
         amt = amt_key(num(ir.get("Amount")))
         cur = ir.get("Currency")
         for r in day.cc_rows:
             if amt_key(num(r.get("Amount"))) == amt and r.get("Currency") == cur:
-                return True, (r.get("Reference") or ""), "Amount+Currency"
-        return False, ref, ""
+                return True, (r.get("Reference") or ""), "Amount+Currency", amt_key(num(r.get("Amount")))
+        return False, ref, "", None
 
     if provider == "Corpay":
         sd = (ir.get("Supplementary Details") or "").strip()
         ref = (ir.get("Reference") or "").strip()
         deal = sd if re.fullmatch(r"\d+", sd) else (ref if re.fullmatch(r"\d+", ref) else "")
         if deal and deal in day.cp_all:
+            src = (day.cp_pay.get(deal) or day.cp_setl.get(deal) or day.cp_fx.get(deal) or [{}])
             where = ("Payments" if deal in day.cp_pay
                      else "Settlements" if deal in day.cp_setl else "FX Deals")
-            return True, deal, f"Deal # ({where})"
-        return False, (deal or ref), ""
+            return True, deal, f"Deal # ({where})", amt_key(src[0].get("amt"))
+        return False, (deal or ref), "", None
 
     if provider == "Zand":
         clean = strip_zand(ir.get("Reference"))
         rfao = (ir.get("Ref for Account Owner") or "").strip()
         if day.zand_idx.get(clean):
-            return True, clean, "Outgoing Id"
+            return True, clean, "Outgoing Id", amt_key(day.zand_idx[clean][0]["amt"])
         if day.zand_idx.get(rfao):
-            return True, rfao, "Ref for Account Owner"
+            return True, rfao, "Ref for Account Owner", amt_key(day.zand_idx[rfao][0]["amt"])
         amt = amt_key(num(ir.get("Amount")))
         for k, lst in day.zand_idx.items():
             for r in lst:
                 if amt_key(r["amt"]) == amt:
-                    return True, k, "Amount"
-        return False, clean, ""
+                    return True, k, "Amount", amt_key(r["amt"])
+        return False, clean, "", None
 
-    return False, "", ""
+    return False, "", "", None
 
 
 # ---------------------------------------------------------------------------
@@ -374,6 +377,15 @@ def provider_row_has_internal(provider: str, prow: dict, day: DayData):
 # ---------------------------------------------------------------------------
 # Result records
 # ---------------------------------------------------------------------------
+def _fmt_amt(v):
+    """Format an amount for output; '' for None, trims trailing .0 noise."""
+    if v is None:
+        return ""
+    if isinstance(v, (int, float)):
+        return f"{v:.2f}"
+    return str(v)
+
+
 @dataclass
 class Record:
     provider: str
@@ -382,23 +394,37 @@ class Record:
     internal_ref: str = ""
     provider_ref: str = ""
     value_date: str = ""
-    amount: str = ""
+    amount_internal: object = None
+    amount_provider: object = None
     currency: str = ""
     txn_type: str = ""
     method: str = ""
     cleared_date: str = ""   # the prior date it reconciled against
     description: str = ""
 
+    @property
+    def difference(self):
+        # Compare magnitudes: providers use signed amounts (debit negative)
+        # while the internal ledger stores magnitudes, so a sign mismatch is a
+        # convention difference, not a real discrepancy.
+        if isinstance(self.amount_internal, (int, float)) and \
+           isinstance(self.amount_provider, (int, float)):
+            return round(abs(self.amount_internal) - abs(self.amount_provider), 2)
+        return None
+
     def as_dict(self):
+        # Leading columns mirror the existing Recon_Results.xlsx schema.
         return {
             "Provider": self.provider,
-            "Side": self.side,
-            "Status": self.status,
             "Internal Ref": self.internal_ref,
             "Provider Ref": self.provider_ref,
             "Value Date": self.value_date,
-            "Amount": self.amount,
+            "Amount (Internal)": _fmt_amt(self.amount_internal),
+            "Amount (Provider)": _fmt_amt(self.amount_provider),
+            "Difference": _fmt_amt(self.difference),
             "Currency": self.currency,
+            "Side": self.side,
+            "Status": self.status,
             "Type": self.txn_type,
             "Method": self.method,
             "Cleared Against": self.cleared_date,
@@ -426,14 +452,15 @@ def reconcile(run_date: _dt.date, day_map: dict, lookback_days: int = 10):
     for provider in PROVIDERS:
         # ---- internal side ----------------------------------------------
         for ir in today.internal.get(provider, []):
-            ok, pref, method = match_internal(provider, ir, today)
+            iamt = amt_key(num(ir.get("Amount")))
+            ok, pref, method, pamt = match_internal(provider, ir, today)
             if ok:
                 matched.append(Record(
                     provider, "internal", "matched",
                     internal_ref=(ir.get("Reference") or ""),
                     provider_ref=pref,
                     value_date=(ir.get("Value Date") or ""),
-                    amount=(ir.get("Amount") or ""),
+                    amount_internal=iamt, amount_provider=pamt,
                     currency=(ir.get("Currency") or ""),
                     txn_type=(ir.get("Transaction Type") or ""),
                     method=method))
@@ -441,20 +468,21 @@ def reconcile(run_date: _dt.date, day_map: dict, lookback_days: int = 10):
             # aged look-back
             cleared_hit = None
             for pd in prior_dates:
-                ok2, pref2, method2 = match_internal(provider, ir, day_map[pd])
+                ok2, pref2, method2, pamt2 = match_internal(provider, ir, day_map[pd])
                 if ok2:
-                    cleared_hit = (pd, pref2, method2)
+                    cleared_hit = (pd, pref2, method2, pamt2)
                     break
             base = dict(
                 internal_ref=(ir.get("Reference") or ""),
                 value_date=(ir.get("Value Date") or ""),
-                amount=(ir.get("Amount") or ""),
+                amount_internal=iamt,
                 currency=(ir.get("Currency") or ""),
                 txn_type=(ir.get("Transaction Type") or ""))
             if cleared_hit:
-                pd, pref2, method2 = cleared_hit
+                pd, pref2, method2, pamt2 = cleared_hit
                 cleared.append(Record(
                     provider, "internal", "cleared", provider_ref=pref2,
+                    amount_provider=pamt2,
                     method=method2, cleared_date=pd.isoformat(),
                     description=f"Not in {provider} on {run_date}; reconciled against {pd}",
                     **base))
@@ -476,18 +504,18 @@ def reconcile(run_date: _dt.date, day_map: dict, lookback_days: int = 10):
                 if provider_row_has_internal(provider, prow, day_map[pd]):
                     cleared_hit = pd
                     break
-            amount = "" if prow["amt"] is None else f"{prow['amt']}"
             if cleared_hit:
                 cleared.append(Record(
                     provider, "provider", "cleared", provider_ref=prow["key"],
-                    amount=amount, currency=prow["cur"],
+                    amount_provider=prow["amt"], currency=prow["cur"],
                     method="Provider→Internal", cleared_date=cleared_hit.isoformat(),
                     description=f"{provider} {prow['key']} not in internal on "
                                 f"{run_date}; reconciled against {cleared_hit}"))
             else:
                 exceptions.append(Record(
                     provider, "provider", "exception", provider_ref=prow["key"],
-                    amount=amount, currency=prow["cur"], method="Missing in Internal",
+                    amount_provider=prow["amt"], currency=prow["cur"],
+                    method="Missing in Internal",
                     description=f"{provider} {prow['key']} not in internal on "
                                 f"{run_date} or prior {lookback_days} days"))
 

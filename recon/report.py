@@ -6,9 +6,9 @@ import html
 from pathlib import Path
 
 REPORT_COLUMNS = [
-    "Provider", "Side", "Status", "Internal Ref", "Provider Ref",
-    "Value Date", "Amount", "Currency", "Type", "Method",
-    "Cleared Against", "Description",
+    "Provider", "Internal Ref", "Provider Ref", "Value Date",
+    "Amount (Internal)", "Amount (Provider)", "Difference", "Currency",
+    "Side", "Status", "Type", "Method", "Cleared Against", "Description",
 ]
 
 
@@ -20,21 +20,25 @@ def write_xlsx(result: dict, path: Path):
     head_font = Font(bold=True, color="FFFFFF")
     head_fill = PatternFill("solid", fgColor="3A4A3F")
 
+    run_date = result["run_date"]
+    cols = ["Run Date"] + REPORT_COLUMNS
+
     def sheet(title, records):
         ws = wb.create_sheet(title)
-        ws.append(REPORT_COLUMNS)
+        ws.append(cols)
         for c in ws[1]:
             c.font = head_font
             c.fill = head_fill
             c.alignment = Alignment(horizontal="left")
         for r in records:
             d = r.as_dict()
-            ws.append([d[c] for c in REPORT_COLUMNS])
+            ws.append([run_date] + [d[c] for c in REPORT_COLUMNS])
         ws.freeze_panes = "A2"
-        for i, col in enumerate(REPORT_COLUMNS, 1):
-            width = max(len(col) + 2,
-                        *(len(str(r.as_dict()[col])) for r in records)) if records else len(col) + 2
-            ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = min(width + 2, 60)
+        for i, col in enumerate(cols, 1):
+            cell_lens = [len(str(run_date))] if col == "Run Date" else \
+                [len(str(r.as_dict().get(col, ""))) for r in records]
+            width = max([len(col)] + cell_lens)
+            ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = min(width + 3, 60)
         return ws
 
     # summary sheet first
@@ -151,13 +155,14 @@ def write_html(result: dict, path: Path):
         for p in result["per_provider"])
 
     exc_cols = [("Provider", ""), ("Side", ""), ("Internal Ref", ""), ("Provider Ref", ""),
-                ("Value Date", ""), ("Amount", "num"), ("Currency", ""), ("Type", ""),
-                ("Description", "desc")]
+                ("Value Date", ""), ("Amount (Internal)", "num"), ("Amount (Provider)", "num"),
+                ("Currency", ""), ("Type", ""), ("Description", "desc")]
     cle_cols = [("Provider", ""), ("Side", ""), ("Internal Ref", ""), ("Provider Ref", ""),
-                ("Amount", "num"), ("Currency", ""), ("Cleared Against", ""),
-                ("Method", "method"), ("Description", "desc")]
-    mat_cols = [("Provider", ""), ("Internal Ref", ""), ("Provider Ref", ""),
-                ("Value Date", ""), ("Amount", "num"), ("Currency", ""), ("Method", "method")]
+                ("Amount (Internal)", "num"), ("Amount (Provider)", "num"), ("Currency", ""),
+                ("Cleared Against", ""), ("Method", "method"), ("Description", "desc")]
+    mat_cols = [("Provider", ""), ("Internal Ref", ""), ("Provider Ref", ""), ("Value Date", ""),
+                ("Amount (Internal)", "num"), ("Amount (Provider)", "num"), ("Difference", "num"),
+                ("Currency", ""), ("Method", "method")]
 
     def thead(cols):
         return "<tr>" + "".join(
