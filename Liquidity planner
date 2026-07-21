@@ -1,0 +1,623 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Liquidity Planner</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+  :root{
+    --ink:#12130f;--paper:#faf9f5;--line:#20221c;
+    --slate:#3a4a3f;--moss:#5a7a52;--clay:#b5533a;--amber:#c8892a;
+    --grid:#e6e3da;--muted:#6b6d63;--ok:#4a6b3f;--warn:#b5533a;--blue:#3a5a7a;
+    --mono:'IBM Plex Mono',ui-monospace,'SF Mono',Menlo,monospace;
+    --sans:'Inter','Helvetica Neue',Arial,sans-serif;
+  }
+  @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap');
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--paper);color:var(--ink);font-family:var(--sans);line-height:1.5;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1180px;margin:0 auto;padding:32px 24px 80px}
+
+  header{border-bottom:2px solid var(--line);padding-bottom:20px;margin-bottom:28px;display:flex;justify-content:space-between;align-items:flex-end;flex-wrap:wrap;gap:16px}
+  .title-block h1{font-size:30px;font-weight:700;letter-spacing:-0.02em;display:flex;align-items:center;gap:12px}
+  .title-block .tag{font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:0.14em;color:var(--muted);margin-top:6px}
+  .datefield{display:flex;flex-direction:column;gap:5px}
+  .datefield label{font-family:var(--mono);font-size:10px;text-transform:uppercase;letter-spacing:0.12em;color:var(--muted)}
+  .datefield input{font-family:var(--mono);font-size:14px;padding:8px 10px;border:1.5px solid var(--line);background:var(--paper);border-radius:0}
+
+  .drop{border:2px dashed var(--line);padding:38px 24px;text-align:center;cursor:pointer;transition:.15s;background:repeating-linear-gradient(45deg,transparent,transparent 12px,rgba(90,122,82,.03) 12px,rgba(90,122,82,.03) 24px)}
+  .drop:hover,.drop.over{background:rgba(90,122,82,.09);border-color:var(--moss)}
+  .drop h2{font-size:17px;font-weight:600;margin-bottom:6px}
+  .drop p{color:var(--muted);font-size:13px}
+  .drop .mono{font-family:var(--mono);font-size:12px;color:var(--moss);margin-top:10px}
+
+  .files{display:flex;flex-wrap:wrap;gap:8px;margin-top:18px}
+  .chip{font-family:var(--mono);font-size:12px;padding:6px 10px;border:1.5px solid var(--line);display:flex;align-items:center;gap:8px;background:#fff}
+  .chip.ok{border-color:var(--moss)}
+  .chip.unknown{border-color:var(--muted);border-style:dashed;color:var(--muted)}
+  .chip .kind{font-size:9px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);border-left:1px solid var(--grid);padding-left:8px}
+  .chip .x{cursor:pointer;color:var(--muted);font-weight:700}
+  .chip .x:hover{color:var(--clay)}
+
+  .opts{display:flex;gap:22px;align-items:center;flex-wrap:wrap;margin-top:20px;font-family:var(--mono);font-size:12px;color:var(--slate)}
+  .opts label{display:flex;align-items:center;gap:8px;cursor:pointer}
+  .opts input[type=checkbox]{width:15px;height:15px;accent-color:var(--moss)}
+  .opts .horizon{display:flex;align-items:center;gap:8px}
+  .opts .horizon input{width:70px;font-family:var(--mono);font-size:12px;padding:6px 8px;border:1.5px solid var(--line);background:var(--paper)}
+
+  .balances{margin-top:24px;display:none}
+  .balances.show{display:block}
+  .balgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:0;border:2px solid var(--line)}
+  .balcell{padding:12px 14px;border-right:1.5px solid var(--line);border-bottom:1.5px solid var(--line);display:flex;flex-direction:column;gap:6px}
+  .balcell .who{font-family:var(--mono);font-size:11px;color:var(--slate);display:flex;justify-content:space-between;align-items:baseline}
+  .balcell .who .cur{font-size:9px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted)}
+  .balcell input{font-family:var(--mono);font-size:14px;padding:7px 9px;border:1.5px solid var(--grid);background:#fff;text-align:right;font-variant-numeric:tabular-nums}
+  .balcell input:focus{border-color:var(--moss);outline:none}
+
+  .actions{display:flex;gap:12px;margin-top:22px;align-items:center;flex-wrap:wrap}
+  button.run{font-family:var(--mono);font-size:13px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;background:var(--ink);color:var(--paper);border:none;padding:13px 26px;cursor:pointer;transition:.15s}
+  button.run:hover:not(:disabled){background:var(--moss)}
+  button.run:disabled{opacity:.35;cursor:not-allowed}
+  button.ghost{font-family:var(--mono);font-size:12px;background:none;border:1.5px solid var(--line);padding:12px 18px;cursor:pointer;text-transform:uppercase;letter-spacing:.06em}
+  button.ghost:hover{background:var(--ink);color:var(--paper)}
+  .hint{font-size:12px;color:var(--muted)}
+
+  .summary{margin-top:36px;display:none}
+  .summary.show{display:block}
+  .sumgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:0;border:2px solid var(--line);margin-bottom:14px}
+  .card{padding:18px 20px;border-right:1.5px solid var(--line)}
+  .card:last-child{border-right:none}
+  .card .lbl{font-family:var(--mono);font-size:10px;text-transform:uppercase;letter-spacing:.12em;color:var(--muted)}
+  .card .val{font-size:34px;font-weight:700;letter-spacing:-.02em;margin-top:4px;font-variant-numeric:tabular-nums}
+  .card.short .val{color:var(--warn)}
+  .card.surplus .val{color:var(--ok)}
+
+  .curstrip{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:6px}
+  .curchip{font-family:var(--mono);font-size:12px;padding:7px 12px;border:1.5px solid var(--line);background:#fff;display:flex;gap:12px;align-items:baseline}
+  .curchip .cc{font-size:10px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted)}
+  .curchip .in{color:var(--ok)}.curchip .out{color:var(--warn)}
+  .curchip .net{font-weight:600}
+
+  h3{font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:.14em;color:var(--muted);margin:26px 0 10px;padding-bottom:6px;border-bottom:1.5px solid var(--line)}
+  h4{font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:var(--slate);margin:20px 0 8px}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th{font-family:var(--mono);font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);text-align:left;padding:8px 10px;border-bottom:1.5px solid var(--line)}
+  td{padding:8px 10px;border-bottom:1px solid var(--grid);font-variant-numeric:tabular-nums}
+  tr:hover td{background:rgba(90,122,82,.05)}
+  .num{text-align:right}
+  .pill{font-family:var(--mono);font-size:11px;padding:2px 8px;display:inline-block}
+  .pill.surplus{color:var(--ok);border:1px solid var(--ok)}
+  .pill.short{color:var(--warn);border:1px solid var(--warn)}
+  .pill.flat{color:var(--slate);border:1px solid var(--grid)}
+  .pos{color:var(--ok)}.neg{color:var(--warn);font-weight:600}
+  .prov{font-family:var(--mono);font-size:12px;color:var(--slate)}
+  .arrow{font-family:var(--mono);color:var(--blue);font-weight:600}
+  tr.shortrow td{background:rgba(181,83,58,.07)}
+  tr.extrow td{background:rgba(200,137,42,.10)}
+
+  .tabs{display:flex;gap:0;margin:30px 0 0;border-bottom:2px solid var(--line);flex-wrap:wrap}
+  .tab{font-family:var(--mono);font-size:12px;text-transform:uppercase;letter-spacing:.08em;padding:11px 18px;cursor:pointer;border:1.5px solid transparent;border-bottom:none;color:var(--muted);position:relative;top:2px}
+  .tab.active{color:var(--ink);border-color:var(--line);background:var(--paper);font-weight:600}
+  .tab .count{font-size:10px;opacity:.7;margin-left:5px}
+  .panel{display:none;padding-top:18px}
+  .panel.active{display:block}
+  .tablewrap{max-height:460px;overflow:auto;border:1.5px solid var(--grid)}
+  .tablewrap table{font-size:12px}
+  .tablewrap th{position:sticky;top:0;background:var(--paper);z-index:1}
+
+  .err{background:#fbeae5;border:1.5px solid var(--clay);color:#8a2f1a;padding:12px 16px;font-family:var(--mono);font-size:12px;margin-top:18px;display:none}
+  .err.show{display:block}
+  .note{font-size:12px;color:var(--muted);margin:6px 0 14px;font-family:var(--mono)}
+
+  .foot{margin-top:40px;font-family:var(--mono);font-size:11px;color:var(--muted);border-top:1px solid var(--grid);padding-top:16px;line-height:1.7}
+  @media(max-width:640px){.card{border-right:none;border-bottom:1.5px solid var(--line)}.sumgrid{grid-template-columns:1fr 1fr}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="title-block">
+      <h1>◨ Liquidity Planner</h1>
+      <div class="tag">Collections vs payments across provider accounts · rebalancing</div>
+    </div>
+    <div class="datefield">
+      <label for="rundate">As-of date</label>
+      <input type="date" id="rundate">
+    </div>
+  </header>
+
+  <div class="drop" id="drop">
+    <h2>Drop the internal recon-lines file here</h2>
+    <p>Same internal export as the recon tool. Credits are read as money collected into a provider account, debits as money paid out. CSV and XLSX both work.</p>
+    <div class="mono">recon-lines &nbsp;·&nbsp; nets inflows &amp; outflows per provider &amp; currency, then suggests transfers</div>
+    <input type="file" id="filein" multiple accept=".csv,.xlsx,.xls" style="display:none">
+  </div>
+
+  <div class="files" id="filelist"></div>
+  <div class="err" id="err"></div>
+
+  <div class="opts" id="opts" style="display:none">
+    <label><input type="checkbox" id="incFees"> Count fee rows as outflows (VAT · remittance fee)</label>
+    <div class="horizon">Horizon <input type="number" id="horizon" min="0" placeholder="all"> days from as-of</div>
+  </div>
+
+  <div class="balances" id="balances">
+    <h3>Opening balances <span style="text-transform:none;letter-spacing:0;color:var(--muted)">— what each provider account holds at the as-of date (blank = start from zero, net movement only)</span></h3>
+    <div class="balgrid" id="balgrid"></div>
+  </div>
+
+  <div class="actions" id="actions" style="display:none">
+    <button class="run" id="runbtn">Build plan</button>
+    <button class="ghost" id="clearbtn">Clear</button>
+    <span class="hint" id="readyhint"></span>
+  </div>
+
+  <div class="summary" id="summary">
+    <div class="sumgrid">
+      <div class="card"><div class="lbl">Movements</div><div class="val" id="s-moves">0</div></div>
+      <div class="card"><div class="lbl">Accounts</div><div class="val" id="s-streams">0</div></div>
+      <div class="card short"><div class="lbl">Short</div><div class="val" id="s-short">0</div></div>
+      <div class="card surplus"><div class="lbl">In surplus</div><div class="val" id="s-surplus">0</div></div>
+      <div class="card"><div class="lbl">Transfers</div><div class="val" id="s-transfers">0</div></div>
+    </div>
+    <div class="curstrip" id="curstrip"></div>
+    <div class="note" id="scopenote"></div>
+
+    <h3>Position by provider &amp; currency</h3>
+    <table id="postable">
+      <thead><tr><th>Provider</th><th>Cur</th><th class="num">Collected in</th><th class="num">Paid out</th><th class="num">Net</th><th class="num">Opening</th><th class="num">Projected</th><th>Position</th></tr></thead>
+      <tbody></tbody>
+    </table>
+
+    <div class="tabs">
+      <div class="tab active" data-tab="rebal">Rebalancing <span class="count" id="t-rebal">0</span></div>
+      <div class="tab" data-tab="byday">By day <span class="count" id="t-byday">0</span></div>
+      <div class="tab" data-tab="moves">Movements <span class="count" id="t-moves">0</span></div>
+      <div class="tab" data-tab="types">Type mapping <span class="count" id="t-types">0</span></div>
+    </div>
+
+    <div class="panel active" id="panel-rebal">
+      <div style="margin-bottom:12px"><button class="ghost" onclick="dl('rebal')">Download rebalancing CSV</button></div>
+      <h4>Suggested internal transfers — move surplus to cover shorts (same currency)</h4>
+      <div class="tablewrap">
+        <table><thead><tr><th>From (surplus)</th><th>To (short)</th><th>Cur</th><th class="num">Amount</th></tr></thead>
+        <tbody id="rebal-body"></tbody></table>
+      </div>
+      <div id="extblock"></div>
+      <div id="parkblock"></div>
+    </div>
+
+    <div class="panel" id="panel-byday">
+      <div style="margin-bottom:12px"><button class="ghost" onclick="dl('byday')">Download daily flows CSV</button></div>
+      <div class="tablewrap">
+        <table><thead><tr><th>Value Date</th><th>Provider</th><th>Cur</th><th class="num">In</th><th class="num">Out</th><th class="num">Net</th><th class="num">Running balance</th></tr></thead>
+        <tbody id="byday-body"></tbody></table>
+      </div>
+    </div>
+
+    <div class="panel" id="panel-moves">
+      <div style="margin-bottom:12px"><button class="ghost" onclick="dl('moves')">Download movements CSV</button></div>
+      <div class="tablewrap">
+        <table><thead><tr><th>Provider</th><th>Cur</th><th>Value Date</th><th>Reference</th><th>Type</th><th>Dir</th><th class="num">Amount</th><th class="num">Running balance</th></tr></thead>
+        <tbody id="moves-body"></tbody></table>
+      </div>
+    </div>
+
+    <div class="panel" id="panel-types">
+      <div class="note">How each internal <b>Transaction Type</b> was read. Check this if a provider's direction looks wrong — collections must map to <span class="pos">in</span>, payments to <span class="neg">out</span>.</div>
+      <div class="tablewrap">
+        <table><thead><tr><th>Transaction Type</th><th>Read as</th><th class="num">Rows</th><th class="num">Total amount</th></tr></thead>
+        <tbody id="types-body"></tbody></table>
+      </div>
+    </div>
+  </div>
+
+  <div class="foot">
+    Model — every line in the internal recon-lines file is a movement on one provider account. <b>Credit</b>-type lines are money collected in; <b>Debit</b>-type lines are money paid out. Per provider + currency: net = collected − paid, projected = opening + net. A negative projected balance is a <span class="neg">short</span>; a positive one is a <span class="pos">surplus</span>. Because a customer may fund one provider (e.g. Corpay) while the payment leaves another, surpluses and shorts appear on different accounts of the same currency — the rebalancing tab greedily moves surplus to cover shorts, and flags any residual that needs external funding. Balances never mix across currencies.<br>
+    Direction is inferred from the Transaction Type text (credit/debit and common synonyms), with the amount sign as fallback — verify it on the Type mapping tab. Fee rows (Debit_FEE_VAT, Debit_FEE_REMITTANCE_FEE) are excluded unless you tick the fee option. All processing happens in your browser — nothing is uploaded.
+  </div>
+</div>
+
+<script>
+// ---------- state ----------
+let FILES = {};        // name -> {content, name}
+let COMBOS = [];       // [{provider, currency, key}]
+let RESULT = null;
+document.getElementById('rundate').value = new Date().toISOString().slice(0,10);
+
+// ---------- parsing helpers (ported 1:1 from the recon tool) ----------
+function num(x){
+  if(x==null) return null;
+  let s=String(x).trim().replace(/,/g,'');
+  if(s===''||s.toLowerCase()==='nan') return null;
+  const neg=s.startsWith('(')&&s.endsWith(')');
+  s=s.replace(/[^0-9.\-]/g,'');
+  if(s===''||s==='-'||s==='.') return null;
+  const v=parseFloat(s); if(isNaN(v)) return null;
+  return neg?-v:v;
+}
+function parseCSV(text){
+  text=text.replace(/^﻿/,'').replace(/\r\n/g,'\n').replace(/\r/g,'\n');
+  const rows=[];let row=[],f='',q=false;
+  for(let i=0;i<text.length;i++){const c=text[i];
+    if(q){if(c==='"'){if(text[i+1]==='"'){f+='"';i++;}else q=false;}else f+=c;}
+    else{if(c==='"')q=true;else if(c===','){row.push(f);f='';}
+      else if(c==='\n'){row.push(f);rows.push(row);row=[];f='';}else f+=c;}
+  }
+  if(f!==''||row.length){row.push(f);rows.push(row);}
+  return rows;
+}
+function toObjects(text,skip){
+  const rows=parseCSV(text);if(rows.length<=skip)return [];
+  const H=rows[skip].map(h=>h.trim());const out=[];
+  for(let r=skip+1;r<rows.length;r++){const c=rows[r];
+    if(c.length===1&&c[0].trim()==='')continue;
+    const o={};H.forEach((h,i)=>o[h]=(c[i]??'').trim());out.push(o);}
+  return out;
+}
+const pick=kw=>{const k=Object.keys(FILES).find(n=>n.toLowerCase().includes(kw.toLowerCase()));return k?FILES[k].content:'';};
+
+function parseDate(s){
+  if(!s) return null;
+  s=String(s).trim(); if(!s) return null;
+  let m=s.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/);
+  if(m) return new Date(+m[1],+m[2]-1,+m[3]);
+  m=s.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})/);
+  if(m) return new Date(+m[3],+m[2]-1,+m[1]);
+  const d=new Date(s); return isNaN(d.getTime())?null:d;
+}
+const fmtNum=v=>(v==null||isNaN(v))?'—':v.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+const fmtSign=v=>(v==null||isNaN(v))?'—':(v>0?'+':'')+fmtNum(v);
+const isoDate=d=>d?d.toISOString().slice(0,10):'';
+const EPS=0.005;
+
+// ---------- provider labels, fees, direction ----------
+const PROV_LABEL={NBF:'NBF',CURRENCY_CLOUD:'Currency Cloud',CORPAY:'Corpay',ZAND:'Zand'};
+const plabel=p=>PROV_LABEL[p]||p||'(blank)';
+const FEE=new Set(['Debit_FEE_VAT','Debit_FEE_REMITTANCE_FEE']);
+const RE_IN =/credit|collect|receiv|deposit|incoming|pay[\s_-]?in|inbound|topup|top[\s_-]?up|refund|fund/i;
+const RE_OUT=/debit|payout|payment|remit|withdraw|outgoing|pay[\s_-]?out|outbound|disburse|transfer|send/i;
+// classify a transaction type into 'in' | 'out' | 'fee' | 'unknown'
+function classify(type,amount){
+  const t=(type||'').trim();
+  if(FEE.has(t)) return 'fee';
+  if(RE_IN.test(t) && !RE_OUT.test(t)) return 'in';
+  if(RE_OUT.test(t) && !RE_IN.test(t)) return 'out';
+  if(RE_IN.test(t) && RE_OUT.test(t)){                 // both words present -> lead word wins
+    return t.search(RE_IN) < t.search(RE_OUT) ? 'in' : 'out';
+  }
+  const n=num(amount);                                  // fallback: sign of amount
+  if(n!=null){ if(n>0) return 'in'; if(n<0) return 'out'; }
+  return 'unknown';
+}
+
+// ---------- file type detection (chips only) ----------
+const KEYWORDS=[
+  ['recon-lines','Internal'],['transactions_report','Currency Cloud'],
+  ['PaymentHistory','Corpay Payments'],['SettlementReport','Corpay Settlements'],
+  ['DealHistory','Corpay FX'],['OpTransactionHistory','NBF'],['downloaded-statement','Zand']
+];
+function detect(name){const m=KEYWORDS.find(([k])=>name.toLowerCase().includes(k.toLowerCase()));return m?m[1]:null;}
+
+// ---------- discover provider×currency combos ----------
+const internalRows=()=>toObjects(pick('recon-lines'),0);
+function discoverCombos(){
+  const seen=new Map();
+  internalRows().forEach(r=>{
+    const p=(r['Payment Provider']||'').trim();
+    const c=(r['Currency']||'').trim();
+    if(!p&&!c) return;
+    const key=p+'|'+c;
+    if(!seen.has(key)) seen.set(key,{provider:p,currency:c,key});
+  });
+  COMBOS=[...seen.values()].sort((a,b)=>
+    plabel(a.provider).localeCompare(plabel(b.provider))||a.currency.localeCompare(b.currency));
+  renderBalances();
+}
+function renderBalances(){
+  const g=document.getElementById('balgrid'),box=document.getElementById('balances');
+  if(!COMBOS.length){box.classList.remove('show');g.innerHTML='';return;}
+  const prev={};document.querySelectorAll('#balgrid input').forEach(i=>prev[i.dataset.key]=i.value);
+  g.innerHTML=COMBOS.map(c=>
+    `<div class="balcell"><div class="who"><span>${plabel(c.provider)}</span><span class="cur">${c.currency||'—'}</span></div>
+     <input type="text" inputmode="decimal" data-key="${c.key}" placeholder="balance in ${c.currency||'currency'}" value="${prev[c.key]||''}"></div>`
+  ).join('');
+  box.classList.add('show');
+}
+
+// ---------- build the plan ----------
+function buildPlan(runDate){
+  const raw=internalRows();
+  if(!raw.length) throw new Error('No recon-lines (internal) file found, or it is empty.');
+  const incFees=document.getElementById('incFees').checked;
+  const hRaw=document.getElementById('horizon').value.trim();
+  const horizon=hRaw===''?null:Math.max(0,parseInt(hRaw,10)||0);
+  const asOf=parseDate(runDate);
+  const cutoff=(asOf&&horizon!=null)?new Date(asOf.getTime()+horizon*86400000):null;
+
+  const balances={};
+  document.querySelectorAll('#balgrid input').forEach(i=>{
+    const v=i.value.trim(); balances[i.dataset.key]= v===''?null:(num(v)??null);
+  });
+
+  const streams={};             // key -> {provider,currency,key,rows:[],inflow,outflow}
+  const typeMap={};             // type -> {dir,count,sum}
+  let skippedFees=0, unknownRows=0, outOfWindow=0;
+
+  raw.forEach(r=>{
+    const type=(r['Transaction Type']||'').trim();
+    const provider=(r['Payment Provider']||'').trim();
+    const currency=(r['Currency']||'').trim();
+    const amt=Math.abs(num(r['Amount'])??0);
+    const d=parseDate(r['Value Date']);
+    if(cutoff&&d&&d>cutoff){outOfWindow++;return;}
+
+    let dir=classify(type,r['Amount']);
+    if(dir==='fee'){ if(!incFees){skippedFees++; tmark(typeMap,type,'fee (excluded)',amt); return;} dir='out'; }
+    tmark(typeMap,type,dir,amt);
+    if(dir==='unknown'){unknownRows++; return;}
+
+    const key=provider+'|'+currency;
+    const s=streams[key]||(streams[key]={provider,currency,key,rows:[],inflow:0,outflow:0});
+    if(dir==='in') s.inflow+=amt; else s.outflow+=amt;
+    s.rows.push({ref:(r['Reference']||'').trim(),type,dir,amount:amt,valueDateRaw:(r['Value Date']||'').trim(),date:d});
+  });
+
+  const positions=[], moves=[], byDayMap={}, curTotals={};
+  const byCurrency={};          // cur -> {surplus:[{provider,amt}], short:[{provider,amt}]}
+  let dateSet=new Set();
+
+  Object.values(streams).sort((a,b)=>
+    plabel(a.provider).localeCompare(plabel(b.provider))||a.currency.localeCompare(b.currency)
+  ).forEach(s=>{
+    s.rows.forEach((r,i)=>r._i=i);
+    s.rows.sort((a,b)=>{
+      if(a.date&&b.date) return a.date-b.date||a._i-b._i;
+      if(a.date) return -1; if(b.date) return 1; return a._i-b._i;
+    });
+    const opening=balances[s.key];
+    const net=s.inflow-s.outflow;
+    const projected=(opening??0)+net;
+    const status=projected<-EPS?'short':(projected>EPS?'surplus':'flat');
+
+    let running=(opening??0),neededBy=null;
+    s.rows.forEach(r=>{
+      const signed=r.dir==='in'?r.amount:-r.amount;
+      running+=signed;
+      if(running<-EPS&&!neededBy) neededBy=r.valueDateRaw||isoDate(r.date)||'(undated)';
+      if(r.valueDateRaw) dateSet.add(r.valueDateRaw);
+      moves.push({provider:s.provider,currency:s.currency,valueDate:r.valueDateRaw,ref:r.ref,type:r.type,dir:r.dir,amount:r.amount,running,short:running<-EPS});
+      const dk=(r.valueDateRaw||'(undated)')+'|'+s.key;
+      const bd=byDayMap[dk]||(byDayMap[dk]={valueDate:r.valueDateRaw||'(undated)',date:r.date,provider:s.provider,currency:s.currency,in:0,out:0,running:0});
+      if(r.dir==='in') bd.in+=r.amount; else bd.out+=r.amount;
+      bd.running=running;
+    });
+
+    positions.push({provider:s.provider,currency:s.currency,inflow:s.inflow,outflow:s.outflow,net,opening,projected,status,neededBy});
+    const ct=curTotals[s.currency]||(curTotals[s.currency]={in:0,out:0});
+    ct.in+=s.inflow; ct.out+=s.outflow;
+    const bc=byCurrency[s.currency]||(byCurrency[s.currency]={surplus:[],short:[]});
+    if(projected>EPS) bc.surplus.push({provider:s.provider,amt:projected});
+    else if(projected<-EPS) bc.short.push({provider:s.provider,amt:-projected});
+  });
+
+  // greedy rebalancing per currency
+  const transfers=[], extNeeds=[], parked=[];
+  Object.keys(byCurrency).sort().forEach(cur=>{
+    const sur=byCurrency[cur].surplus.map(x=>({...x})).sort((a,b)=>b.amt-a.amt);
+    const sho=byCurrency[cur].short.map(x=>({...x})).sort((a,b)=>b.amt-a.amt);
+    let i=0,j=0;
+    while(i<sur.length&&j<sho.length){
+      const move=Math.min(sur[i].amt,sho[j].amt);
+      if(move>EPS) transfers.push({from:sur[i].provider,to:sho[j].provider,currency:cur,amount:move});
+      sur[i].amt-=move; sho[j].amt-=move;
+      if(sur[i].amt<=EPS) i++;
+      if(sho[j].amt<=EPS) j++;
+    }
+    for(;j<sho.length;j++) if(sho[j].amt>EPS) extNeeds.push({provider:sho[j].provider,currency:cur,amount:sho[j].amt});
+    for(;i<sur.length;i++) if(sur[i].amt>EPS) parked.push({provider:sur[i].provider,currency:cur,amount:sur[i].amt});
+  });
+  transfers.sort((a,b)=>b.amount-a.amount);
+  extNeeds.sort((a,b)=>b.amount-a.amount);
+  parked.sort((a,b)=>b.amount-a.amount);
+
+  const byDay=Object.values(byDayMap).sort((a,b)=>{
+    if(a.date&&b.date) return a.date-b.date||plabel(a.provider).localeCompare(plabel(b.provider));
+    if(a.date) return -1; if(b.date) return 1;
+    return plabel(a.provider).localeCompare(plabel(b.provider))||a.currency.localeCompare(b.currency);
+  });
+
+  const types=Object.entries(typeMap).map(([type,v])=>({type,...v}))
+    .sort((a,b)=>a.dir.localeCompare(b.dir)||b.count-a.count);
+
+  return {
+    runDate,horizon,incFees,
+    moveCount:moves.length,streamCount:positions.length,
+    shortCount:positions.filter(p=>p.status==='short').length,
+    surplusCount:positions.filter(p=>p.status==='surplus').length,
+    positions,transfers,extNeeds,parked,byDay,moves,types,curTotals,
+    dateCount:dateSet.size,skippedFees,unknownRows,outOfWindow
+  };
+}
+function tmark(map,type,dir,amt){const k=type||'(blank)';const m=map[k]||(map[k]={dir,count:0,sum:0});m.dir=dir;m.count++;m.sum+=amt;}
+
+// ---------- file reading (ported 1:1) ----------
+function readFile(file){
+  return new Promise((res,rej)=>{
+    const ext=file.name.toLowerCase().split('.').pop();
+    const rd=new FileReader();
+    rd.onerror=()=>rej(new Error('Could not read '+file.name));
+    if(ext==='xlsx'||ext==='xls'){
+      rd.onload=e=>{try{
+        const wb=XLSX.read(new Uint8Array(e.target.result),{type:'array'});
+        const ws=wb.Sheets[wb.SheetNames[0]];
+        res({name:file.name.replace(/\.(xlsx|xls)$/i,'.csv'),content:XLSX.utils.sheet_to_csv(ws)});
+      }catch(err){rej(new Error('Failed to parse xlsx: '+file.name));}};
+      rd.readAsArrayBuffer(file);
+    }else{
+      rd.onload=e=>res({name:file.name,content:e.target.result});
+      rd.readAsText(file);
+    }
+  });
+}
+
+// ---------- UI ----------
+const drop=document.getElementById('drop'),filein=document.getElementById('filein');
+const filelist=document.getElementById('filelist'),actions=document.getElementById('actions');
+const err=document.getElementById('err');
+drop.onclick=()=>filein.click();
+drop.ondragover=e=>{e.preventDefault();drop.classList.add('over');};
+drop.ondragleave=()=>drop.classList.remove('over');
+drop.ondrop=e=>{e.preventDefault();drop.classList.remove('over');addFiles(e.dataTransfer.files);};
+filein.onchange=e=>addFiles(e.target.files);
+
+async function addFiles(fileList){
+  err.classList.remove('show');
+  for(const f of fileList){
+    try{const parsed=await readFile(f);FILES[parsed.name]=parsed;}
+    catch(e){showErr(e.message);}
+  }
+  renderFiles(); discoverCombos();
+}
+function showErr(m){err.textContent=m;err.classList.add('show');}
+function renderFiles(){
+  const names=Object.keys(FILES);
+  filelist.innerHTML=names.map(n=>{
+    const kind=detect(n),isInternal=kind==='Internal';
+    const cls=isInternal?'ok':'unknown';
+    const shown=isInternal?'Internal':(kind?kind+' · reference':'unrecognized');
+    return `<div class="chip ${cls}"><span>${n}</span><span class="kind">${shown}</span><span class="x" onclick="rm('${n.replace(/'/g,"\\'")}')">✕</span></div>`;
+  }).join('');
+  const has=names.length>0;
+  actions.style.display=has?'flex':'none';
+  document.getElementById('opts').style.display=has?'flex':'none';
+  const haveInternal=names.map(detect).some(k=>k==='Internal');
+  document.getElementById('readyhint').textContent=haveInternal
+    ?'Ready — set opening balances (optional) then build the plan'
+    :'⚠ Need the internal recon-lines file';
+}
+window.rm=n=>{delete FILES[n];renderFiles();discoverCombos();};
+document.getElementById('clearbtn').onclick=()=>{
+  FILES={};COMBOS=[];RESULT=null;renderFiles();
+  document.getElementById('summary').classList.remove('show');
+  document.getElementById('balances').classList.remove('show');
+  document.getElementById('balgrid').innerHTML='';
+};
+
+document.getElementById('runbtn').onclick=()=>{
+  err.classList.remove('show');
+  try{
+    const rd=document.getElementById('rundate').value||new Date().toISOString().slice(0,10);
+    RESULT=buildPlan(rd); render(RESULT);
+    document.getElementById('summary').scrollIntoView({behavior:'smooth',block:'start'});
+  }catch(e){showErr(e.message);}
+};
+
+function render(R){
+  document.getElementById('summary').classList.add('show');
+  document.getElementById('s-moves').textContent=R.moveCount;
+  document.getElementById('s-streams').textContent=R.streamCount;
+  document.getElementById('s-short').textContent=R.shortCount;
+  document.getElementById('s-surplus').textContent=R.surplusCount;
+  document.getElementById('s-transfers').textContent=R.transfers.length;
+
+  document.getElementById('curstrip').innerHTML=Object.keys(R.curTotals).sort().map(c=>{
+    const t=R.curTotals[c],net=t.in-t.out;
+    return `<div class="curchip"><span class="cc">${c||'—'}</span><span class="in">in ${fmtNum(t.in)}</span><span class="out">out ${fmtNum(t.out)}</span><span class="net ${net<0?'neg':'pos'}">net ${fmtSign(net)}</span></div>`;
+  }).join('');
+
+  const notes=[];
+  if(R.horizon!=null) notes.push('Horizon: '+R.horizon+' days from as-of ('+R.outOfWindow+' lines beyond window excluded).');
+  if(R.skippedFees) notes.push(R.skippedFees+' fee lines excluded.');
+  if(R.unknownRows) notes.push('⚠ '+R.unknownRows+' lines could not be classified in/out — see Type mapping.');
+  document.getElementById('scopenote').textContent=notes.join('  ');
+
+  document.querySelector('#postable tbody').innerHTML=R.positions.map(p=>`
+    <tr class="${p.status==='short'?'shortrow':''}">
+      <td class="prov">${plabel(p.provider)}</td><td>${p.currency||'—'}</td>
+      <td class="num pos">${fmtNum(p.inflow)}</td>
+      <td class="num neg">${fmtNum(p.outflow)}</td>
+      <td class="num ${p.net<0?'neg':'pos'}">${fmtSign(p.net)}</td>
+      <td class="num">${p.opening==null?'—':fmtNum(p.opening)}</td>
+      <td class="num ${p.projected<0?'neg':''}">${fmtNum(p.projected)}</td>
+      <td><span class="pill ${p.status}">${p.status}</span></td>
+    </tr>`).join('')||'<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:24px">No movements in scope.</td></tr>';
+
+  document.getElementById('t-rebal').textContent=R.transfers.length;
+  document.getElementById('t-byday').textContent=R.byDay.length;
+  document.getElementById('t-moves').textContent=R.moves.length;
+  document.getElementById('t-types').textContent=R.types.length;
+
+  document.getElementById('rebal-body').innerHTML=R.transfers.map(t=>`
+    <tr><td class="prov">${plabel(t.from)}</td><td class="prov">${plabel(t.to)} <span class="arrow">◂</span></td>
+    <td>${t.currency||'—'}</td><td class="num">${fmtNum(t.amount)}</td></tr>`).join('')
+    ||'<tr><td colspan="4" style="text-align:center;color:var(--muted);padding:24px">No internal transfers needed.</td></tr>';
+
+  document.getElementById('extblock').innerHTML=R.extNeeds.length?
+    `<h4 style="color:var(--warn)">External funding required — no same-currency surplus to cover</h4>
+     <div class="tablewrap"><table><thead><tr><th>Provider</th><th>Cur</th><th class="num">Top-up needed</th></tr></thead>
+     <tbody>${R.extNeeds.map(e=>`<tr class="extrow"><td class="prov">${plabel(e.provider)}</td><td>${e.currency||'—'}</td><td class="num neg">${fmtNum(e.amount)}</td></tr>`).join('')}</tbody></table></div>`:'';
+
+  document.getElementById('parkblock').innerHTML=R.parked.length?
+    `<h4>Surplus left parked after covering shorts</h4>
+     <div class="tablewrap"><table><thead><tr><th>Provider</th><th>Cur</th><th class="num">Idle surplus</th></tr></thead>
+     <tbody>${R.parked.map(p=>`<tr><td class="prov">${plabel(p.provider)}</td><td>${p.currency||'—'}</td><td class="num pos">${fmtNum(p.amount)}</td></tr>`).join('')}</tbody></table></div>`:'';
+
+  document.getElementById('byday-body').innerHTML=R.byDay.map(d=>`
+    <tr><td>${d.valueDate}</td><td class="prov">${plabel(d.provider)}</td><td>${d.currency||'—'}</td>
+    <td class="num pos">${d.in?fmtNum(d.in):'—'}</td><td class="num neg">${d.out?fmtNum(d.out):'—'}</td>
+    <td class="num ${d.in-d.out<0?'neg':'pos'}">${fmtSign(d.in-d.out)}</td>
+    <td class="num ${d.running<0?'neg':''}">${fmtNum(d.running)}</td></tr>`).join('')
+    ||'<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:24px">Nothing scheduled.</td></tr>';
+
+  document.getElementById('moves-body').innerHTML=R.moves.map(m=>`
+    <tr class="${m.short?'shortrow':''}"><td class="prov">${plabel(m.provider)}</td><td>${m.currency||'—'}</td>
+    <td>${m.valueDate||'—'}</td><td>${m.ref||'—'}</td><td>${m.type||'—'}</td>
+    <td class="${m.dir==='in'?'pos':'neg'}">${m.dir}</td>
+    <td class="num ${m.dir==='in'?'pos':'neg'}">${m.dir==='in'?'+':'−'}${fmtNum(m.amount)}</td>
+    <td class="num ${m.short?'neg':''}">${fmtNum(m.running)}</td></tr>`).join('')
+    ||'<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:24px">Nothing scheduled.</td></tr>';
+
+  document.getElementById('types-body').innerHTML=R.types.map(t=>{
+    const cls=t.dir==='in'?'pos':(t.dir==='out'?'neg':(t.dir==='unknown'?'neg':'prov'));
+    return `<tr><td>${t.type}</td><td class="${cls}">${t.dir}</td><td class="num">${t.count}</td><td class="num">${fmtNum(t.sum)}</td></tr>`;
+  }).join('')||'<tr><td colspan="4" style="text-align:center;color:var(--muted);padding:24px">No types.</td></tr>';
+}
+
+// tabs
+document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{
+  document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
+  document.querySelectorAll('.panel').forEach(x=>x.classList.remove('active'));
+  t.classList.add('active');
+  document.getElementById('panel-'+t.dataset.tab).classList.add('active');
+});
+
+// download
+window.dl=which=>{
+  if(!RESULT)return;
+  let head,rows,fn;
+  if(which==='rebal'){
+    head=['As-of','Type','From','To','Currency','Amount'];
+    rows=[
+      ...RESULT.transfers.map(t=>[RESULT.runDate,'internal transfer',plabel(t.from),plabel(t.to),t.currency,t.amount]),
+      ...RESULT.extNeeds.map(e=>[RESULT.runDate,'external funding','',plabel(e.provider),e.currency,e.amount]),
+      ...RESULT.parked.map(p=>[RESULT.runDate,'parked surplus',plabel(p.provider),'',p.currency,p.amount]),
+    ];
+    fn='rebalancing_'+RESULT.runDate+'.csv';
+  }else if(which==='byday'){
+    head=['As-of','Value Date','Provider','Currency','In','Out','Net','Running Balance'];
+    rows=RESULT.byDay.map(d=>[RESULT.runDate,d.valueDate,plabel(d.provider),d.currency,d.in,d.out,d.in-d.out,d.running]);
+    fn='daily-flows_'+RESULT.runDate+'.csv';
+  }else{
+    head=['As-of','Provider','Currency','Value Date','Reference','Type','Direction','Amount','Running Balance'];
+    rows=RESULT.moves.map(m=>[RESULT.runDate,plabel(m.provider),m.currency,m.valueDate,m.ref,m.type,m.dir,(m.dir==='in'?m.amount:-m.amount),m.running]);
+    fn='movements_'+RESULT.runDate+'.csv';
+  }
+  const esc=v=>{v=String(v??'');return /[",\n]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v;};
+  const csv=[head.map(esc).join(','),...rows.map(r=>r.map(esc).join(','))].join('\n');
+  const blob=new Blob([csv],{type:'text/csv'});
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=fn;a.click();
+};
+</script>
+</body>
+</html>
