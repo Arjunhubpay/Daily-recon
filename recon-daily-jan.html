@@ -251,7 +251,9 @@ const amtKey=v=>v==null?null:Math.round(Math.abs(v)*100)/100;
 const FT_RE=/FT[0-9]{5}[A-Z0-9]{5}/;
 // Pull the FT reference out of any free text (provider description or internal ref).
 const extractFT=t=>{const m=t?String(t).toUpperCase().match(FT_RE):null;return m?m[0]:null;};
-const stripZand=r=>r==null?'':String(r).trim().replace(/_[0-9a-fA-F]{8}$/,'');
+// Zand internal refs look like "D769592590293173_<extra>"; the provider Outgoing Id
+// is just the part before the first underscore, so match on that prefix.
+const stripZand=r=>r==null?'':String(r).trim().replace(/_.*$/,'');
 
 // ---------- CSV parsing ----------
 function parseCSV(text){
