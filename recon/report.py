@@ -72,9 +72,8 @@ def write_xlsx(result: dict, path: Path):
     wb.save(path)
 
 
-IT_COLS = ["Pair Key", "Provider", "Value Date", "Amount", "Currency",
-           "Debit Legs", "Credit Legs", "Other Legs", "Debit Ref", "Credit Ref",
-           "Status", "Note"]
+IT_COLS = ["Status", "Value Date", "Amount", "Currency", "Debit Provider",
+           "Credit Provider", "Debit Ref", "Credit Ref", "Account", "Pairing", "Note"]
 
 
 def write_daily_snapshot(result: dict, lsum: dict, path: Path, transfers=None):
@@ -253,9 +252,9 @@ def write_html(result: dict, path: Path, lsum: dict = None, transfers=None):
         return "<tr>" + "".join(
             f'<th class="{cls}">{_esc(c)}</th>' for c, cls in cols) + "</tr>"
 
-    it_cols = [("Status", ""), ("Provider", ""), ("Value Date", ""), ("Amount", "num"),
-               ("Currency", ""), ("Debit Legs", "num"), ("Credit Legs", "num"),
-               ("Pair Key", ""), ("Note", "desc")]
+    it_cols = [("Status", ""), ("Value Date", ""), ("Amount", "num"), ("Currency", ""),
+               ("Debit Provider", ""), ("Credit Provider", ""), ("Debit Ref", ""),
+               ("Credit Ref", ""), ("Account", ""), ("Pairing", ""), ("Note", "desc")]
     it_rows = transfers or []
     it_pending = sum(1 for t in it_rows if t["Status"] in ("Credit pending", "Debit pending"))
     it_tab = (f'<div class="tab" data-tab="itr">Internal transfers '

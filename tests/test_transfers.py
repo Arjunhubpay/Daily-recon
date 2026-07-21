@@ -39,11 +39,11 @@ def run():
     assert s["credit_pending"] == 1, s
 
     by_status = {t["Status"]: t for t in transfers}
-    assert by_status["Matched"]["Pair Key"] == U1
     assert by_status["Matched"]["Amount"] == "1858.80"
-    assert by_status["Credit pending"]["Pair Key"] == U2
-    assert by_status["Credit pending"]["Debit Legs"] == 1
-    assert by_status["Credit pending"]["Credit Legs"] == 0
+    assert by_status["Matched"]["Debit Ref"] == "D111_aaaaaaaa"
+    assert by_status["Matched"]["Credit Ref"] == "D111_bbbbbbbb"
+    assert by_status["Credit pending"]["Debit Ref"] == "D222_cccccccc"
+    assert by_status["Credit pending"]["Credit Ref"] == ""
     print("test_transfers: OK")
 
 

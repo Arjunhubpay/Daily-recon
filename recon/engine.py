@@ -410,22 +410,22 @@ def open_item_reconciles(provider, side, key, amount, currency, day: DayData):
 
 # ---------------------------------------------------------------------------
 # Internal transfers (intra-Hubpay: a debit from one own account + a credit to
-# another). Detected from the internal ledger markers; the two legs are paired
-# and a transfer whose credit leg has not posted yet is flagged.
+# another). Runs alongside the normal recon (legs are NOT removed from it) and
+# is surfaced separately. A leg is internal when it carries one of the
+# configured tags OR its counterparty is one of Hubpay's own accounts. Legs are
+# paired within a provider (shared Ref for Account Owner) and then across
+# providers (amount + currency + value date); an unpaired leg is a transfer
+# whose other side has not posted yet.
 # ---------------------------------------------------------------------------
-# Only the bank/system-generated transaction description (Supplementary
-# Details) is treated as authoritative. Free-text reference fields
-# (Reference / Ref for Account Owner) are NOT scanned — they carry
-# customer- or reference-entered text (e.g. an "Own Account Transfer" note on
-# an ordinary incoming customer credit) and produce false positives.
-INTERNAL_MARKERS = ("internal transfer", "intercompany", "inter company")
 _UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
                       r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 
 
 def is_internal_leg(r: dict) -> bool:
-    sd = (r.get("Supplementary Details") or "").lower()
-    return any(m in sd for m in INTERNAL_MARKERS)
+    from .accounts import has_internal_tag, find_account
+    fields = (r.get("Reference", ""), r.get("Supplementary Details", ""),
+              r.get("Ref for Account Owner", ""))
+    return has_internal_tag(*fields) or find_account(*fields) is not None
 
 
 def leg_direction(r: dict) -> str:
@@ -441,61 +441,101 @@ def _pair_key(r: dict):
     rfao = (r.get("Ref for Account Owner") or "").strip()
     if _UUID_RE.match(rfao):
         return rfao                       # Zand: both legs share this UUID
-    base = strip_zand(r.get("Reference"))
-    return base or rfao or (r.get("Reference") or "").strip()
+    return strip_zand(r.get("Reference")) or rfao or (r.get("Reference") or "").strip()
+
+
+def _leg(provider, r):
+    from .accounts import find_account
+    acct = find_account(r.get("Reference", ""), r.get("Supplementary Details", ""),
+                         r.get("Ref for Account Owner", ""))
+    return {
+        "provider": provider, "dir": leg_direction(r),
+        "amt": amt_key(num(r.get("Amount"))), "cur": (r.get("Currency") or ""),
+        "date": (r.get("Value Date") or ""), "ref": (r.get("Reference") or ""),
+        "key": _pair_key(r), "account": (acct[2] if acct else ""),
+        "note": (r.get("Supplementary Details") or r.get("Ref for Account Owner") or "")[:60],
+    }
+
+
+def _mk_transfer(debit, credit, pairing):
+    row = debit or credit
+    if debit and credit:
+        status = ("Matched" if abs((debit["amt"] or 0) - (credit["amt"] or 0)) < 0.01
+                  else "Amount mismatch")
+    elif debit:
+        status = "Credit pending"
+    elif credit:
+        status = "Debit pending"
+    else:
+        status = "Unpaired leg"
+    return {
+        "Status": status,
+        "Amount": _fmt_amt((debit or credit)["amt"]),
+        "Currency": row["cur"],
+        "Value Date": row["date"],
+        "Debit Provider": debit["provider"] if debit else "",
+        "Credit Provider": credit["provider"] if credit else "",
+        "Debit Ref": debit["ref"] if debit else "",
+        "Credit Ref": credit["ref"] if credit else "",
+        "Account": (debit or credit)["account"] or (credit["account"] if credit else ""),
+        "Pairing": pairing,
+        "Note": row["note"],
+    }
 
 
 def internal_transfers(day: DayData):
     """Return (transfers: [dict], summary: dict) for one day's internal ledger."""
-    legs = []
-    for provider, rows in day.internal.items():
-        for r in rows:
-            if is_internal_leg(r):
-                legs.append((provider, r))
-
-    groups = {}
-    for provider, r in legs:
-        groups.setdefault(_pair_key(r), []).append((provider, r))
+    legs = [_leg(p, r) for p, rows in day.internal.items() for r in rows
+            if is_internal_leg(r)]
 
     transfers = []
-    for key, members in groups.items():
-        debits = [(p, r) for p, r in members if leg_direction(r) == "debit"]
-        credits = [(p, r) for p, r in members if leg_direction(r) == "credit"]
-        others = [(p, r) for p, r in members if leg_direction(r) == "other"]
-        damt = round(sum(num(r.get("Amount")) or 0 for _, r in debits), 2)
-        camt = round(sum(num(r.get("Amount")) or 0 for _, r in credits), 2)
-        oamt = round(sum(num(r.get("Amount")) or 0 for _, r in others), 2)
+    used = [False] * len(legs)
 
-        if debits and credits:
-            status = "Matched" if abs(damt - camt) < 0.01 else "Amount mismatch"
-        elif debits and not credits:
-            status = "Credit pending"
-        elif credits and not debits:
-            status = "Debit pending"
+    # Pass 1 — same-provider pairing by the shared key (Zand debit+credit)
+    groups = {}
+    for i, L in enumerate(legs):
+        groups.setdefault(L["key"], []).append(i)
+    for idxs in groups.values():
+        debits = [i for i in idxs if legs[i]["dir"] == "debit"]
+        credits = [i for i in idxs if legs[i]["dir"] == "credit"]
+        for di, ci in zip(debits, credits):
+            transfers.append(_mk_transfer(legs[di], legs[ci], "same key"))
+            used[di] = used[ci] = True
+
+    # Pass 2 — cross-provider pairing by (amount, currency, value date)
+    def free(pred):
+        return [i for i, L in enumerate(legs) if not used[i] and pred(L)]
+
+    for di in free(lambda L: L["dir"] in ("debit", "other")):
+        if used[di]:
+            continue
+        d = legs[di]
+        for ci in free(lambda L: L["dir"] in ("credit", "other")):
+            if used[ci] or ci == di:
+                continue
+            c = legs[ci]
+            if (d["provider"] != c["provider"] and d["amt"] == c["amt"]
+                    and d["cur"] == c["cur"] and d["date"] == c["date"]):
+                transfers.append(_mk_transfer(d, c, "amount+date (cross-provider)"))
+                used[di] = used[ci] = True
+                break
+
+    # Pass 3 — leftovers are pending / unpaired legs
+    for i, L in enumerate(legs):
+        if used[i]:
+            continue
+        if L["dir"] == "debit":
+            transfers.append(_mk_transfer(L, None, "unpaired"))
+        elif L["dir"] == "credit":
+            transfers.append(_mk_transfer(None, L, "unpaired"))
         else:
-            status = "Unpaired leg"   # only untyped legs (e.g. NBF 'N'): needs cross-account info
-
-        provs = sorted({p for p, _ in members})
-        any_row = (debits or credits or others)[0][1]
-        transfers.append({
-            "Pair Key": key,
-            "Provider": ", ".join(provs),
-            "Value Date": any_row.get("Value Date", ""),
-            "Amount": _fmt_amt(damt or camt or oamt or None),
-            "Currency": any_row.get("Currency", ""),
-            "Debit Legs": len(debits),
-            "Credit Legs": len(credits),
-            "Other Legs": len(others),
-            "Debit Ref": ";".join((r.get("Reference") or "") for _, r in debits),
-            "Credit Ref": ";".join((r.get("Reference") or "") for _, r in credits),
-            "Status": status,
-            "Note": (any_row.get("Supplementary Details")
-                     or any_row.get("Ref for Account Owner") or "")[:60],
-        })
+            t = _mk_transfer(L, None, "unpaired")
+            t["Status"] = "Unpaired leg"
+            transfers.append(t)
 
     order = {"Credit pending": 0, "Debit pending": 1, "Amount mismatch": 2,
              "Unpaired leg": 3, "Matched": 4}
-    transfers.sort(key=lambda t: (order.get(t["Status"], 9), t["Pair Key"]))
+    transfers.sort(key=lambda t: (order.get(t["Status"], 9), t["Debit Ref"], t["Credit Ref"]))
     summary = {
         "total": len(transfers),
         "matched": sum(1 for t in transfers if t["Status"] == "Matched"),
