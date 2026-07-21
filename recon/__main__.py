@@ -31,7 +31,7 @@ import sys
 from pathlib import Path
 
 from . import ledger
-from .engine import internal_transfers, load_day, reconcile
+from .engine import load_day, reconcile
 from .report import write_daily_snapshot, write_html
 
 DATA_EXTS = (".csv", ".xlsx", ".xls")
@@ -97,7 +97,7 @@ def main(argv=None):
         return 2
 
     result = reconcile(run_date, day_map, args.lookback, two_sided=not args.one_sided)
-    transfers, tsum = internal_transfers(day_map[run_date])
+    transfers, tsum = result["transfers"], result["transfer_summary"]
 
     # --- rolling open-exceptions ledger (carried forward across runs) --------
     master = out_root / "Open_Exceptions.xlsx"

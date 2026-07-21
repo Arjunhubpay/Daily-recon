@@ -394,6 +394,10 @@ def open_item_reconciles(provider, side, key, amount, currency, day: DayData):
     (provider_ref recorded when the exception was opened)."""
     key = (key or "").strip()
     a = amt_key(num(amount))
+    if side == "transfer":
+        # a pending internal transfer clears when the destination bank finally
+        # shows a credit for the amount
+        return _build_credit_pools(day).get(provider, {}).get(a, 0) > 0
     if side == "internal":
         # has the PROVIDER now reported this internal item?
         if provider == "NBF":
@@ -712,6 +716,22 @@ def reconcile(run_date: _dt.date, day_map: dict, lookback_days: int = 10,
                     description=f"{provider} {prow['key']} not in internal on "
                                 f"{run_date} or prior {lookback_days} days"))
 
+    # Internal transfers whose other leg has not posted are real open items —
+    # fold them into the exceptions so they appear in (and age within) the
+    # Open Exceptions ledger, not only the internal-transfers view.
+    transfers, tsummary = internal_transfers(today)
+    for t in transfers:
+        if t["Status"] not in ("Credit pending", "Debit pending"):
+            continue
+        dest = t["Destination"] if t["Destination"] not in ("", "?") else t["Source"]
+        exceptions.append(Record(
+            dest, "transfer", "exception",
+            provider_ref=t["Ref"], amount_provider=num(t["Amount"]),
+            currency=t["Currency"], method=f"Internal transfer — {t['Status'].lower()}",
+            description=(f"Internal transfer {t['Source']} → {t['Destination']} "
+                         f"{t['Ref']} {t['Amount']} {t['Currency']}: {t['Status'].lower()} "
+                         f"(other leg not posted)")))
+
     per_provider = []
     for p in PROVIDERS:
         per_provider.append({
@@ -731,4 +751,6 @@ def reconcile(run_date: _dt.date, day_map: dict, lookback_days: int = 10,
         "exceptions": exceptions,
         "per_provider": per_provider,
         "internal_count": internal_count,
+        "transfers": transfers,
+        "transfer_summary": tsummary,
     }
