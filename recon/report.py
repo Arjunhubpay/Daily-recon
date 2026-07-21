@@ -72,7 +72,12 @@ def write_xlsx(result: dict, path: Path):
     wb.save(path)
 
 
-def write_daily_snapshot(result: dict, lsum: dict, path: Path):
+IT_COLS = ["Pair Key", "Provider", "Value Date", "Amount", "Currency",
+           "Debit Legs", "Credit Legs", "Other Legs", "Debit Ref", "Credit Ref",
+           "Status", "Note"]
+
+
+def write_daily_snapshot(result: dict, lsum: dict, path: Path, transfers=None):
     """Dated record for the date folder: recon summary + the open-exceptions
     state as of this run + what was newly opened and cleared today."""
     import openpyxl
@@ -128,6 +133,8 @@ def write_daily_snapshot(result: dict, lsum: dict, path: Path):
     sheet("Open Exceptions", OPEN_COLS, lsum["open_rows"])
     sheet("New Today", OPEN_COLS, lsum["new_today_rows"])
     sheet("Cleared Today", CLEARED_COLS, lsum["cleared_today_rows"])
+    if transfers is not None:
+        sheet("Internal Transfers", IT_COLS, transfers)
 
     path.parent.mkdir(parents=True, exist_ok=True)
     wb.save(path)
@@ -212,7 +219,7 @@ def _dict_rows(rows, cols):
     return "".join(out)
 
 
-def write_html(result: dict, path: Path, lsum: dict = None):
+def write_html(result: dict, path: Path, lsum: dict = None, transfers=None):
     exc, cle, mat = result["exceptions"], result["cleared"], result["matched"]
     rate = (round(100 * len(mat) / result["internal_count"])
             if result["internal_count"] else 0)
@@ -246,6 +253,17 @@ def write_html(result: dict, path: Path, lsum: dict = None):
         return "<tr>" + "".join(
             f'<th class="{cls}">{_esc(c)}</th>' for c, cls in cols) + "</tr>"
 
+    it_cols = [("Status", ""), ("Provider", ""), ("Value Date", ""), ("Amount", "num"),
+               ("Currency", ""), ("Debit Legs", "num"), ("Credit Legs", "num"),
+               ("Pair Key", ""), ("Note", "desc")]
+    it_rows = transfers or []
+    it_pending = sum(1 for t in it_rows if t["Status"] in ("Credit pending", "Debit pending"))
+    it_tab = (f'<div class="tab" data-tab="itr">Internal transfers '
+              f'<span class="count">{len(it_rows)}</span></div>') if transfers is not None else ""
+    it_panel = (f'<div class="panel" id="panel-itr"><div class="tablewrap"><table>'
+                f'<thead>{thead(it_cols)}</thead><tbody>{_dict_rows(it_rows, it_cols)}</tbody>'
+                f'</table></div></div>') if transfers is not None else ""
+
     # ledger-aware cards + tabs (when a ledger summary is supplied)
     if lsum is not None:
         cards = (
@@ -254,10 +272,14 @@ def write_html(result: dict, path: Path, lsum: dict = None):
             f'<div class="card"><div class="lbl">New exceptions</div><div class="val">{lsum["new_today"]}</div></div>'
             f'<div class="card exceptions"><div class="lbl">Open (total)</div><div class="val">{lsum["open_total"]}</div></div>'
             f'<div class="card exceptions"><div class="lbl">Manual review</div><div class="val">{lsum["open_manual"]}</div></div>')
+        if transfers is not None:
+            cards += (f'<div class="card exceptions"><div class="lbl">Transfers: credit pending</div>'
+                      f'<div class="val">{it_pending}</div></div>')
         manual_rows = [r for r in lsum["open_rows"] if r.get("Status") == "Manual Review"]
         tabs = (
             f'<div class="tab active" data-tab="open">Open exceptions <span class="count">{lsum["open_total"]}</span></div>'
             f'<div class="tab" data-tab="manual">Manual review <span class="count">{len(manual_rows)}</span></div>'
+            f'{it_tab}'
             f'<div class="tab" data-tab="clr">Cleared today <span class="count">{lsum["cleared_today"]}</span></div>'
             f'<div class="tab" data-tab="mat">Matched today <span class="count">{len(mat)}</span></div>')
         panels = (
@@ -265,6 +287,7 @@ def write_html(result: dict, path: Path, lsum: dict = None):
             f'<thead>{thead(open_cols)}</thead><tbody>{_dict_rows(lsum["open_rows"], open_cols)}</tbody></table></div></div>'
             f'<div class="panel" id="panel-manual"><div class="tablewrap"><table>'
             f'<thead>{thead(open_cols)}</thead><tbody>{_dict_rows(manual_rows, open_cols)}</tbody></table></div></div>'
+            f'{it_panel}'
             f'<div class="panel" id="panel-clr"><div class="tablewrap"><table>'
             f'<thead>{thead(clr_cols)}</thead><tbody>{_dict_rows(lsum["cleared_today_rows"], clr_cols)}</tbody></table></div></div>'
             f'<div class="panel" id="panel-mat"><div class="tablewrap"><table>'

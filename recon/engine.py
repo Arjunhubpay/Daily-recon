@@ -408,6 +408,104 @@ def open_item_reconciles(provider, side, key, amount, currency, day: DayData):
         return False
 
 
+# ---------------------------------------------------------------------------
+# Internal transfers (intra-Hubpay: a debit from one own account + a credit to
+# another). Detected from the internal ledger markers; the two legs are paired
+# and a transfer whose credit leg has not posted yet is flagged.
+# ---------------------------------------------------------------------------
+INTERNAL_MARKERS = (
+    "internal transfer", "own account transfer", "own account",
+    "intercompany", "inter company", "inter group transfer", "fis-own account",
+)
+_UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+                      r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
+
+def is_internal_leg(r: dict) -> bool:
+    blob = " ".join([r.get("Reference", ""), r.get("Supplementary Details", ""),
+                     r.get("Ref for Account Owner", "")]).lower()
+    return any(m in blob for m in INTERNAL_MARKERS)
+
+
+def leg_direction(r: dict) -> str:
+    tt = (r.get("Transaction Type") or "").strip().lower()
+    if tt == "credit":
+        return "credit"
+    if tt == "debit":
+        return "debit"
+    return "other"
+
+
+def _pair_key(r: dict):
+    rfao = (r.get("Ref for Account Owner") or "").strip()
+    if _UUID_RE.match(rfao):
+        return rfao                       # Zand: both legs share this UUID
+    base = strip_zand(r.get("Reference"))
+    return base or rfao or (r.get("Reference") or "").strip()
+
+
+def internal_transfers(day: DayData):
+    """Return (transfers: [dict], summary: dict) for one day's internal ledger."""
+    legs = []
+    for provider, rows in day.internal.items():
+        for r in rows:
+            if is_internal_leg(r):
+                legs.append((provider, r))
+
+    groups = {}
+    for provider, r in legs:
+        groups.setdefault(_pair_key(r), []).append((provider, r))
+
+    transfers = []
+    for key, members in groups.items():
+        debits = [(p, r) for p, r in members if leg_direction(r) == "debit"]
+        credits = [(p, r) for p, r in members if leg_direction(r) == "credit"]
+        others = [(p, r) for p, r in members if leg_direction(r) == "other"]
+        damt = round(sum(num(r.get("Amount")) or 0 for _, r in debits), 2)
+        camt = round(sum(num(r.get("Amount")) or 0 for _, r in credits), 2)
+        oamt = round(sum(num(r.get("Amount")) or 0 for _, r in others), 2)
+
+        if debits and credits:
+            status = "Matched" if abs(damt - camt) < 0.01 else "Amount mismatch"
+        elif debits and not credits:
+            status = "Credit pending"
+        elif credits and not debits:
+            status = "Debit pending"
+        else:
+            status = "Unpaired leg"   # only untyped legs (e.g. NBF 'N'): needs cross-account info
+
+        provs = sorted({p for p, _ in members})
+        any_row = (debits or credits or others)[0][1]
+        transfers.append({
+            "Pair Key": key,
+            "Provider": ", ".join(provs),
+            "Value Date": any_row.get("Value Date", ""),
+            "Amount": _fmt_amt(damt or camt or oamt or None),
+            "Currency": any_row.get("Currency", ""),
+            "Debit Legs": len(debits),
+            "Credit Legs": len(credits),
+            "Other Legs": len(others),
+            "Debit Ref": ";".join((r.get("Reference") or "") for _, r in debits),
+            "Credit Ref": ";".join((r.get("Reference") or "") for _, r in credits),
+            "Status": status,
+            "Note": (any_row.get("Supplementary Details")
+                     or any_row.get("Ref for Account Owner") or "")[:60],
+        })
+
+    order = {"Credit pending": 0, "Debit pending": 1, "Amount mismatch": 2,
+             "Unpaired leg": 3, "Matched": 4}
+    transfers.sort(key=lambda t: (order.get(t["Status"], 9), t["Pair Key"]))
+    summary = {
+        "total": len(transfers),
+        "matched": sum(1 for t in transfers if t["Status"] == "Matched"),
+        "credit_pending": sum(1 for t in transfers if t["Status"] == "Credit pending"),
+        "debit_pending": sum(1 for t in transfers if t["Status"] == "Debit pending"),
+        "amount_mismatch": sum(1 for t in transfers if t["Status"] == "Amount mismatch"),
+        "unpaired": sum(1 for t in transfers if t["Status"] == "Unpaired leg"),
+    }
+    return transfers, summary
+
+
 def reconciles_in_window(provider, side, key, amount, currency, day_map, dates):
     """True if the open item reconciles in ANY of the given days (tolerates
     skipped runs, e.g. weekends). Returns the first matching date, or None."""

@@ -31,7 +31,7 @@ import sys
 from pathlib import Path
 
 from . import ledger
-from .engine import load_day, reconcile
+from .engine import internal_transfers, load_day, reconcile
 from .report import write_daily_snapshot, write_html
 
 DATA_EXTS = (".csv", ".xlsx", ".xls")
@@ -93,6 +93,7 @@ def main(argv=None):
         return 2
 
     result = reconcile(run_date, day_map, args.lookback)
+    transfers, tsum = internal_transfers(day_map[run_date])
 
     # --- rolling open-exceptions ledger (carried forward across runs) --------
     master = out_root / "Open_Exceptions.xlsx"
@@ -104,17 +105,17 @@ def main(argv=None):
     date_folder = _day_folder(root, run_date)
     snapshot = date_folder / f"Recon_Summary_{run_date.isoformat()}.xlsx"
     dated_html = date_folder / f"dashboard_{run_date.isoformat()}.html"
-    write_daily_snapshot(result, lsum, snapshot)
-    write_html(result, dated_html, lsum)
+    write_daily_snapshot(result, lsum, snapshot, transfers)
+    write_html(result, dated_html, lsum, transfers)
     # stable "latest" dashboard at the output root
-    write_html(result, out_root / "dashboard_latest.html", lsum)
+    write_html(result, out_root / "dashboard_latest.html", lsum, transfers)
 
     if not args.quiet:
-        _print_summary(result, lsum, master, snapshot)
+        _print_summary(result, lsum, master, snapshot, tsum)
     return 0
 
 
-def _print_summary(result, lsum, master, snapshot):
+def _print_summary(result, lsum, master, snapshot, tsum):
     print(f"\nRecon Daily — {result['run_date']}  (look-back {result['lookback_days']}d)")
     print(f"  prior days used   : {', '.join(result['prior_dates']) or 'none'}")
     print(f"  internal rows     : {result['internal_count']}")
@@ -123,6 +124,10 @@ def _print_summary(result, lsum, master, snapshot):
     print(f"  new exceptions    : {lsum['new_today']}")
     print(f"  cleared today     : {lsum['cleared_today']}")
     print(f"  OPEN (total)      : {lsum['open_total']}  (manual review: {lsum['open_manual']})")
+    print(f"  internal transfers: {tsum['total']}  "
+          f"(matched {tsum['matched']}, credit pending {tsum['credit_pending']}, "
+          f"debit pending {tsum['debit_pending']}, mismatch {tsum['amount_mismatch']}, "
+          f"unpaired {tsum['unpaired']})")
     print(f"\n  open ledger : {master}")
     print(f"  dated file  : {snapshot}")
 
