@@ -89,12 +89,12 @@ def run():
         run_date = _dt.date(2026, 7, 21)
         day_map = collect_day_map(root, run_date, 10)
 
-        # internal-driven (default): only internal-not-in-provider exceptions
-        ri = reconcile(run_date, day_map, 10)
+        # internal-driven: only internal-not-in-provider exceptions
+        ri = reconcile(run_date, day_map, 10, two_sided=False)
         assert len(ri["exceptions"]) == 4, len(ri["exceptions"])
 
-        # two-sided: also provider-not-in-internal
-        r = reconcile(run_date, day_map, 10, two_sided=True)
+        # two-sided (default): also provider-not-in-internal
+        r = reconcile(run_date, day_map, 10)
         assert r["internal_count"] == 16, r["internal_count"]
         assert len(r["matched"]) == 8, len(r["matched"])
         assert len(r["cleared"]) == 4, len(r["cleared"])

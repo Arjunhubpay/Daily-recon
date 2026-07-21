@@ -624,12 +624,13 @@ class Record:
 # Full reconciliation with look-back aging
 # ---------------------------------------------------------------------------
 def reconcile(run_date: _dt.date, day_map: dict, lookback_days: int = 10,
-              two_sided: bool = False):
+              two_sided: bool = True):
     """
     day_map: {date -> DayData}. Must contain run_date; may contain prior days.
-    two_sided: also flag provider rows missing from the internal ledger
-        (Missing in Internal). Default False — the recon is internal-driven,
-        matching the existing process. Enable for a full bidirectional check.
+    two_sided: full bidirectional check (default). Flags both internal rows
+        missing from the provider (Missing in Provider) AND provider rows
+        missing from the internal tracker (Missing in Internal). Set False for
+        an internal-driven recon only.
     Returns a result dict with matched / cleared / exceptions / per-provider.
     """
     today = day_map[run_date]
