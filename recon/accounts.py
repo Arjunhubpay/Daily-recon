@@ -19,13 +19,23 @@ HUBPAY_ACCOUNTS = {
     "GB41TCCL04140492650644":  ("Currency Cloud", "Currency Cloud (all ccy)"),
 }
 
-# Tags attached when initiating an internal movement (matched case-insensitively).
+# Tags/phrases that mark an internal movement (matched case- and
+# spacing-insensitively, so "inter company transfer" == "intercompany transfer"
+# and "Internal Transfer 2026-12" matches "internal transfer").
 INTERNAL_TAGS = (
-    "internal transfer dnt",
+    "internal transfer",
     "fis-own account transfer",
     "own account transfer",
     "intercompany transfer",
 )
+
+# A movement whose description names one of our own banks as the destination
+# is internal even without a tag (e.g. Zand "Transfer to NBF for AR-...").
+OWN_BANK_NAMES = ("nbf", "zand", "corpay", "currency cloud")
+
+# Fee sweeps between own accounts are NOT treated as internal transfers here;
+# they stay in the normal recon only.
+FEE_PHRASES = ("transfer of fee",)
 
 _NON_ALNUM = re.compile(r"[^0-9A-Za-z]")
 
@@ -54,4 +64,13 @@ def find_account(*texts):
 
 def has_internal_tag(*texts) -> bool:
     blob = " ".join(t for t in texts if t).lower()
-    return any(tag in blob for tag in INTERNAL_TAGS)
+    if any(p in blob for p in FEE_PHRASES):
+        return False                      # fee sweeps handled by normal recon only
+    despaced = blob.replace(" ", "")
+    for tag in INTERNAL_TAGS:
+        if tag in blob or tag.replace(" ", "") in despaced:
+            return True
+    # "transfer to <own bank>" names an own account as the destination
+    if "transfer to " in blob and any(b in blob for b in OWN_BANK_NAMES):
+        return True
+    return False

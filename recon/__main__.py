@@ -70,6 +70,9 @@ def main(argv=None):
                     help="Days to look back when aging breaks (default: 10).")
     ap.add_argument("--out", default=None,
                     help="Output folder (default: <root>/_recon_reports).")
+    ap.add_argument("--two-sided", action="store_true",
+                    help="Also flag provider rows missing from internal "
+                         "(default off: internal-driven recon).")
     ap.add_argument("--quiet", action="store_true", help="Suppress the console summary.")
     args = ap.parse_args(argv)
 
@@ -92,7 +95,7 @@ def main(argv=None):
               f"(expected in {_day_folder(root, run_date)})", file=sys.stderr)
         return 2
 
-    result = reconcile(run_date, day_map, args.lookback)
+    result = reconcile(run_date, day_map, args.lookback, two_sided=args.two_sided)
     transfers, tsum = internal_transfers(day_map[run_date])
 
     # --- rolling open-exceptions ledger (carried forward across runs) --------

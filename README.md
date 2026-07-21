@@ -95,6 +95,7 @@ Options:
 | `--root` | *(required)* | Share folder containing the dated sub-folders. |
 | `--date` | today | Run date, `YYYY-MM-DD`. |
 | `--lookback` | `10` | Days to look back when aging a break. |
+| `--two-sided` | off | Also flag provider rows missing from internal. Default off — recon is internal-driven (matches the existing process). |
 | `--out` | `<root>/_recon_reports` | Output folder. |
 | `--quiet` | off | Suppress the console summary. |
 
