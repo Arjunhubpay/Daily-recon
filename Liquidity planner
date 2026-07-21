@@ -128,7 +128,7 @@
 
   <div class="drop" id="drop">
     <h2>Drop the internal recon-lines file here</h2>
-    <p>Same internal export as the recon tool. Credits are read as money collected into a provider account, debits as money paid out. CSV and XLSX both work.</p>
+    <p>Same internal export as the recon tool. Credit Type C is read as money collected into a provider account, D as money paid out. CSV and XLSX both work.</p>
     <div class="mono">recon-lines &nbsp;·&nbsp; nets inflows &amp; outflows per provider &amp; currency, then suggests transfers</div>
     <input type="file" id="filein" multiple accept=".csv,.xlsx,.xls" style="display:none">
   </div>
@@ -204,17 +204,17 @@
     </div>
 
     <div class="panel" id="panel-types">
-      <div class="note">How each internal <b>Transaction Type</b> was read. Check this if a provider's direction looks wrong — collections must map to <span class="pos">in</span>, payments to <span class="neg">out</span>.</div>
+      <div class="note">How each line's <b>direction</b> was decided. The <b>Credit Type</b> column drives it (C = money in, D = money out); Transaction Type text or amount sign are used only when Credit Type is blank. Check here if a provider's direction looks wrong.</div>
       <div class="tablewrap">
-        <table><thead><tr><th>Transaction Type</th><th>Read as</th><th class="num">Rows</th><th class="num">Total amount</th></tr></thead>
+        <table><thead><tr><th>Direction signal</th><th>Read as</th><th class="num">Rows</th><th class="num">Total amount</th></tr></thead>
         <tbody id="types-body"></tbody></table>
       </div>
     </div>
   </div>
 
   <div class="foot">
-    Model — every line in the internal recon-lines file is a movement on one provider account. <b>Credit</b>-type lines are money collected in; <b>Debit</b>-type lines are money paid out. Per provider + currency: net = collected − paid, projected = opening + net. A negative projected balance is a <span class="neg">short</span>; a positive one is a <span class="pos">surplus</span>. Because a customer may fund one provider (e.g. Corpay) while the payment leaves another, surpluses and shorts appear on different accounts of the same currency — the rebalancing tab greedily moves surplus to cover shorts, and flags any residual that needs external funding. Balances never mix across currencies.<br>
-    Direction is inferred from the Transaction Type text (credit/debit and common synonyms), with the amount sign as fallback — verify it on the Type mapping tab. Fee rows (Debit_FEE_VAT, Debit_FEE_REMITTANCE_FEE) are excluded unless you tick the fee option. All processing happens in your browser — nothing is uploaded.
+    Model — every line in the internal recon-lines file is a movement on one provider account. The <b>Credit Type</b> column sets direction: <b>C</b> is money collected in, <b>D</b> is money paid out. Per provider + currency: net = collected − paid, projected = opening + net. A negative projected balance is a <span class="neg">short</span>; a positive one is a <span class="pos">surplus</span>. Because a customer may fund one provider (e.g. Corpay) while the payment leaves another, surpluses and shorts appear on different accounts of the same currency — the rebalancing tab greedily moves surplus to cover shorts, and flags any residual that needs external funding. Balances never mix across currencies.<br>
+    Direction comes from the Credit Type column (C/D); a line with no Credit Type falls back to the Transaction Type text and then the amount sign — verify on the Type mapping tab. Fee rows (Debit_FEE_VAT, Debit_FEE_REMITTANCE_FEE) are excluded unless you tick the fee option. All processing happens in your browser — nothing is uploaded.
   </div>
 </div>
 
@@ -345,22 +345,31 @@ function buildPlan(runDate){
   let skippedFees=0, unknownRows=0, outOfWindow=0;
 
   raw.forEach(r=>{
-    const type=(r['Transaction Type']||'').trim();
+    const ttype=(r['Transaction Type']||'').trim();
+    const ctype=(r['Credit Type']||'').trim().toUpperCase();
     const provider=(r['Payment Provider']||'').trim();
     const currency=(r['Currency']||'').trim();
     const amt=Math.abs(num(r['Amount'])??0);
     const d=parseDate(r['Value Date']);
     if(cutoff&&d&&d>cutoff){outOfWindow++;return;}
 
-    let dir=classify(type,r['Amount']);
-    if(dir==='fee'){ if(!incFees){skippedFees++; tmark(typeMap,type,'fee (excluded)',amt); return;} dir='out'; }
-    tmark(typeMap,type,dir,amt);
-    if(dir==='unknown'){unknownRows++; return;}
+    // Direction: fee rows honour the toggle; otherwise the Credit Type column
+    // (C = money collected in, D = money paid out) is authoritative, with the
+    // Transaction Type text / amount sign used only when Credit Type is blank.
+    let dir,label;
+    if(FEE.has(ttype)){
+      if(!incFees){skippedFees++;tmark(typeMap,'Fee · '+ttype,'fee (excluded)',amt);return;}
+      dir='out'; label='Fee · '+ttype+' → out';
+    }else if(ctype==='C'){dir='in';label='Credit Type C → in';}
+    else if(ctype==='D'){dir='out';label='Credit Type D → out';}
+    else{dir=classify(ttype,r['Amount']);label='No Credit Type · '+(ttype||'blank')+' → '+dir;}
+    tmark(typeMap,label,dir,amt);
+    if(dir==='unknown'){unknownRows++;return;}
 
     const key=provider+'|'+currency;
     const s=streams[key]||(streams[key]={provider,currency,key,rows:[],inflow:0,outflow:0});
     if(dir==='in') s.inflow+=amt; else s.outflow+=amt;
-    s.rows.push({ref:(r['Reference']||'').trim(),type,dir,amount:amt,valueDateRaw:(r['Value Date']||'').trim(),date:d});
+    s.rows.push({ref:(r['Reference']||'').trim(),type:ttype,dir,amount:amt,valueDateRaw:(r['Value Date']||'').trim(),date:d});
   });
 
   const positions=[], moves=[], byDayMap={}, curTotals={};
