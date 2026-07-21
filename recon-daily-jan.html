@@ -249,7 +249,8 @@ function num(x){
 }
 const amtKey=v=>v==null?null:Math.round(Math.abs(v)*100)/100;
 const FT_RE=/FT[0-9]{5}[A-Z0-9]{5}/;
-const extractFT=t=>{const m=t?String(t).match(FT_RE):null;return m?m[0]:null;};
+// Pull the FT reference out of any free text (provider description or internal ref).
+const extractFT=t=>{const m=t?String(t).toUpperCase().match(FT_RE):null;return m?m[0]:null;};
 const stripZand=r=>r==null?'':String(r).trim().replace(/_[0-9a-fA-F]{8}$/,'');
 
 // ---------- CSV parsing ----------
@@ -425,7 +426,12 @@ function analyze(focus){
   // ----- match every internal row (all months) -----
   const rows=internal.map(ir=>{
     const prov=ir['Payment Provider'];let rec=null,method='',label=prov||'—';
-    if(prov==='NBF'){const ref=(ir['Reference']||'').trim();rec=consume(nbf,x=>x.key===ref);if(rec)method='FT code';label='NBF';}
+    if(prov==='NBF'){label='NBF';
+      // The FT reference sits inside the provider description; the internal ref may also
+      // carry surrounding text — normalise both to the FT code before matching.
+      const ft=extractFT(ir['Reference'])||extractFT(ir['Supplementary Details'])||extractFT(ir['Ref for Account Owner']);
+      const ref=ft||(ir['Reference']||'').trim().toUpperCase();
+      rec=consume(nbf,x=>x.key===ref);if(rec)method=ft?'FT code':'Reference';}
     else if(prov==='CURRENCY_CLOUD'){label='Currency Cloud';const ref=(ir['Reference']||'').trim();
       rec=consume(cc,x=>x.key===ref);if(rec)method='Reference';
       else{const a=amtKey(num(ir['Amount'])),c=ir['Currency'];rec=consume(cc,x=>amtKey(x.amt)===a&&x.cur===c);if(rec)method='Amount+Currency';}}
