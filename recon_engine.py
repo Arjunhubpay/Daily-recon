@@ -266,7 +266,11 @@ def intransit_pairs(internal, M, gap_days=12):
                 if o['prov'] == i['prov']: continue
                 gap = abs((i['dt'] - o['dt']).days)
                 mo, mi = (o['dt'].year, o['dt'].month), (i['dt'].year, i['dt'].month)
-                if gap <= gap_days and mo != mi and M in (mo, mi):
+                # Zero-false-positive rule: only pair when at least one leg is one the
+                # platform itself could NOT clear. Two CLEARED legs sharing a round
+                # amount are independently-reconciled transactions, not the same money.
+                un = o['x'].get('Recon Status') != 'CLEARED' or i['x'].get('Recon Status') != 'CLEARED'
+                if gap <= gap_days and mo != mi and M in (mo, mi) and un:
                     cand.append((gap, o, i))
         for gap, o, i in sorted(cand, key=lambda z: z[0]):
             if id(o) in usedO or id(i) in usedI: continue
