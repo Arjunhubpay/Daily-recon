@@ -143,7 +143,8 @@ def load(data_dir):
 def build_provider_index(files):
     """Return dicts used for matching + provider-month lookup."""
     idx = {'nbf_ft': set(), 'cc_ref': set(), 'cc_ac': set(),
-           'corpay': set(), 'corpay_m': {}, 'zand_oid': set(), 'zand_amt': set(), 'zand_m': {}, 'cc_m': {}}
+           'corpay': set(), 'corpay_set_m': {}, 'corpay_pay_m': {},
+           'zand_oid': set(), 'zand_amt': set(), 'zand_m': {}, 'cc_m': {}}
 
     for kind, entries in files.items():
         for typ, ref, name in entries:
@@ -166,15 +167,18 @@ def build_provider_index(files):
                         if mo: idx['cc_m'].setdefault(r, mo)
                     idx['cc_ac'].add((amtk(x.get('Amount')), (x.get('Currency') or '').strip()))
             elif kind in ('CORPAY_PAY', 'CORPAY_SET', 'CORPAY_FX') and typ == 'csv':
-                datecol = {'CORPAY_PAY': 'Date', 'CORPAY_SET': 'Settlement Date', 'CORPAY_FX': 'Date'}[kind]
+                # Provider month for overlaps uses SETTLEMENT date (money moved), then
+                # payment date. FX deal date is NOT used — a deal struck late in the
+                # month but settling T+2 next month is not a boundary break.
+                datecol = {'CORPAY_PAY': 'Date', 'CORPAY_SET': 'Settlement Date', 'CORPAY_FX': None}[kind]
                 for x in dict_rows(ref):
-                    mo = m_iso(x.get(datecol))
+                    mo = m_iso(x.get(datecol)) if datecol else None
                     for c in ('Deal #', 'Order #', 'Tracker ID', 'Reference'):
                         v = (x.get(c) or '').strip()
                         if v:
                             idx['corpay'].add(v)
-                            if mo and kind == 'CORPAY_SET': idx['corpay_m'].setdefault(v, mo)
-                            elif mo: idx['corpay_m'].setdefault(v, mo)
+                            if mo and kind == 'CORPAY_SET': idx['corpay_set_m'].setdefault(v, mo)
+                            if mo and kind == 'CORPAY_PAY': idx['corpay_pay_m'].setdefault(v, mo)
             elif kind == 'ZAND' and typ == 'csv':
                 for x in dict_rows(ref):
                     o = (x.get('Outgoing Id') or '').strip()
@@ -209,7 +213,7 @@ def match_row(x, idx):
         for cand in [(x.get('Reference') or '').strip(), (x.get('Supplementary Details') or '').strip(),
                      (x.get('Ref for Account Owner') or '').strip(), deal_of(x)]:
             if cand and cand in idx['corpay']:
-                return (True, idx['corpay_m'].get(cand))
+                return (True, idx['corpay_set_m'].get(cand) or idx['corpay_pay_m'].get(cand))
         return (False, None)
     if p == 'ZAND':
         rf = (x.get('Ref for Account Owner') or '').strip(); pre = (x.get('Reference') or '').split('_')[0]
@@ -230,9 +234,13 @@ def main(data_dir, months=None):
 
     rows = []
     present = set()
+    flagged_by_month = {}   # internal Recon Status != CLEARED -> timing / in-transit / pending
     for x in internal:
-        if x.get('Transaction Type') in FEE: continue
         im = m_ddmmyyyy(x.get('Value Date'))
+        st = (x.get('Recon Status') or '').strip()
+        if st and st != 'CLEARED':
+            flagged_by_month.setdefault(im, []).append(x)
+        if x.get('Transaction Type') in FEE: continue
         if im: present.add(im)
         matched, pm = match_row(x, idx)
         rows.append((x, im, matched, pm))
@@ -262,11 +270,13 @@ def main(data_dir, months=None):
         for p in ['CURRENCY_CLOUD', 'NBF', 'ZAND', 'CORPAY']:
             t, mt = provs.get(p, [0, 0])
             summary.append([mlabel(M), p, t, mt, t - mt])
+        flagged = flagged_by_month.get(M, [])
         _write(os.path.join(outdir, 'missing_%s.csv' % mlabel(M)), missing, mkey=True)
         _write(os.path.join(outdir, 'overlaps_%s.csv' % mlabel(M)), overlaps, mkey=True, overlap=True)
+        _write_flagged(os.path.join(outdir, 'flagged_%s.csv' % mlabel(M)), flagged)
         tot = sum(v[0] for v in provs.values()); mat = sum(v[1] for v in provs.values())
-        print('%s  internal=%-6d matched=%-6d missing=%-4d overlaps=%-4d' % (
-            mlabel(M), tot, mat, tot - mat, len(overlaps)))
+        print('%s  internal=%-6d matched=%-6d missing=%-4d overlaps=%-4d internal-flagged=%-4d' % (
+            mlabel(M), tot, mat, tot - mat, len(overlaps), len(flagged)))
 
     with open(os.path.join(outdir, 'summary.csv'), 'w', newline='') as fh:
         w = csv.writer(fh); w.writerow(['Month', 'Provider', 'Internal', 'Matched', 'Missing']); w.writerows(summary)
@@ -281,6 +291,17 @@ def _write(path, items, mkey=False, overlap=False):
             w.writerow([x.get('Payment Provider'), mlabel(im), mlabel(pm) if pm else '',
                         x.get('Reference'), x.get('Value Date'), x.get('Amount'),
                         x.get('Currency'), x.get('Transaction Type'), (x.get('Description') or '')[:90]])
+
+def _write_flagged(path, items):
+    """Internal rows the platform's own recon left != CLEARED (timing / in-transit / pending)."""
+    hdr = ['Provider', 'Recon Status', 'Value Date', 'Reference', 'Amount', 'Currency',
+           'Transaction Type', 'Description']
+    with open(path, 'w', newline='') as fh:
+        w = csv.writer(fh); w.writerow(hdr)
+        for x in items:
+            w.writerow([x.get('Payment Provider'), x.get('Recon Status'), x.get('Value Date'),
+                        x.get('Reference'), x.get('Amount'), x.get('Currency'),
+                        x.get('Transaction Type'), (x.get('Description') or '')[:90]])
 
 if __name__ == '__main__':
     if len(sys.argv) < 2:
