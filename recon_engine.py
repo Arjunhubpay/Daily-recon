@@ -53,6 +53,21 @@ def amtk(v):
 def m_ddmmyyyy(s):
     m = re.match(r'(\d{2})/(\d{2})/(\d{4})', s or '');  return (int(m.group(3)), int(m.group(2))) if m else None
 
+def d_ddmmyyyy(s):
+    m = re.match(r'(\d{2})/(\d{2})/(\d{4})', s or '')
+    return datetime.date(int(m.group(3)), int(m.group(2)), int(m.group(1))) if m else None
+
+TRANSFER_RE = re.compile(
+    r'internal transf|own account|own acct|\boat\b|prefund|fundcorpay|hubpayprefund|'
+    r'rtn of funds|intl\.? transfer|internal payment|internal fund|transfer within|intra bank', re.I)
+
+def leg_direction(x):
+    ct = (x.get('Credit Type') or '').strip().upper()
+    blob = ((x.get('Description') or '') + ' ' + (x.get('Transaction Type') or '')).lower()
+    if ct == 'C' or 'incoming' in blob or 'inward' in blob or 'transfer in' in blob or 'credit' in blob: return 'IN'
+    if ct == 'D' or 'outgoing' in blob or 'outward' in blob or 'transfer out' in blob or 'debit' in blob: return 'OUT'
+    return '?'
+
 def m_iso(s):
     m = re.match(r'(\d{4})-(\d{2})', s or '');  return (int(m.group(1)), int(m.group(2))) if m else None
 
@@ -223,6 +238,54 @@ def match_row(x, idx):
         return (False, None)
     return (False, None)
 
+# ---------- in-transit internal transfers straddling the month boundary ----------
+def intransit_pairs(internal, M, gap_days=12):
+    """Pair internal-transfer OUT/IN legs (same amount+currency, opposite provider,
+    <= gap_days apart) that fall in different, adjacent months around M. Heuristic —
+    there is no cross-account transfer id, so pairing is by amount+date."""
+    prev, nxt = month_add(M, -1), month_add(M, 1)
+    win = {prev, M, nxt}
+    legs = []
+    for x in internal:
+        dt = d_ddmmyyyy(x.get('Value Date'))
+        if not dt or (dt.year, dt.month) not in win: continue
+        blob = (x.get('Description') or '') + ' ' + (x.get('Supplementary Details') or '') + ' ' + (x.get('Ref for Account Owner') or '')
+        if not TRANSFER_RE.search(blob): continue
+        di = leg_direction(x)
+        if di in ('IN', 'OUT'):
+            legs.append({'x': x, 'dt': dt, 'amt': amtk(x.get('Amount')), 'cur': (x.get('Currency') or '').strip(),
+                         'dir': di, 'prov': x.get('Payment Provider')})
+    from collections import defaultdict
+    grp = defaultdict(lambda: {'IN': [], 'OUT': []})
+    for L in legs: grp[(L['amt'], L['cur'])][L['dir']].append(L)
+    pairs, usedO, usedI = [], set(), set()
+    for _, d in grp.items():
+        cand = []
+        for o in d['OUT']:
+            for i in d['IN']:
+                if o['prov'] == i['prov']: continue
+                gap = abs((i['dt'] - o['dt']).days)
+                mo, mi = (o['dt'].year, o['dt'].month), (i['dt'].year, i['dt'].month)
+                if gap <= gap_days and mo != mi and M in (mo, mi):
+                    cand.append((gap, o, i))
+        for gap, o, i in sorted(cand, key=lambda z: z[0]):
+            if id(o) in usedO or id(i) in usedI: continue
+            usedO.add(id(o)); usedI.add(id(i)); pairs.append((gap, o, i))
+    return pairs
+
+def _write_intransit(path, pairs):
+    hdr = ['Confidence', 'Amount', 'Currency', 'Gap (days)',
+           'OUT date', 'OUT provider', 'OUT status', 'IN date', 'IN provider', 'IN status', 'Description']
+    with open(path, 'w', newline='') as fh:
+        w = csv.writer(fh); w.writerow(hdr)
+        for gap, o, i in sorted(pairs, key=lambda t: -(t[1]['amt'] or 0)):
+            statuses = o['x'].get('Recon Status', '') + i['x'].get('Recon Status', '')
+            hi = gap <= 5 or 'UNRECONCILED' in statuses or 'PENDING' in statuses
+            w.writerow(['HIGH' if hi else 'review', '%.2f' % (o['amt'] or 0), o['cur'], gap,
+                        o['x'].get('Value Date'), o['prov'], o['x'].get('Recon Status'),
+                        i['x'].get('Value Date'), i['prov'], i['x'].get('Recon Status'),
+                        (o['x'].get('Description') or '')[:70]])
+
 # ---------- main ----------
 def main(data_dir, months=None):
     files = load(data_dir)
@@ -271,12 +334,14 @@ def main(data_dir, months=None):
             t, mt = provs.get(p, [0, 0])
             summary.append([mlabel(M), p, t, mt, t - mt])
         flagged = flagged_by_month.get(M, [])
+        itpairs = intransit_pairs(internal, M)
         _write(os.path.join(outdir, 'missing_%s.csv' % mlabel(M)), missing, mkey=True)
         _write(os.path.join(outdir, 'overlaps_%s.csv' % mlabel(M)), overlaps, mkey=True, overlap=True)
         _write_flagged(os.path.join(outdir, 'flagged_%s.csv' % mlabel(M)), flagged)
+        _write_intransit(os.path.join(outdir, 'intransit_%s.csv' % mlabel(M)), itpairs)
         tot = sum(v[0] for v in provs.values()); mat = sum(v[1] for v in provs.values())
-        print('%s  internal=%-6d matched=%-6d missing=%-4d overlaps=%-4d internal-flagged=%-4d' % (
-            mlabel(M), tot, mat, tot - mat, len(overlaps), len(flagged)))
+        print('%s  internal=%-6d matched=%-6d missing=%-4d overlaps=%-4d flagged=%-4d in-transit=%-4d' % (
+            mlabel(M), tot, mat, tot - mat, len(overlaps), len(flagged), len(itpairs)))
 
     with open(os.path.join(outdir, 'summary.csv'), 'w', newline='') as fh:
         w = csv.writer(fh); w.writerow(['Month', 'Provider', 'Internal', 'Matched', 'Missing']); w.writerows(summary)
