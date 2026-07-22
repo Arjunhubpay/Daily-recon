@@ -249,6 +249,7 @@ function num(x){
 }
 const amtKey=v=>v==null?null:Math.round(Math.abs(v)*100)/100;
 const FT_RE=/FT[0-9]{5}[A-Z0-9]{5}/;
+const FT_RE_G=/FT[0-9]{5}[A-Z0-9]{5}/g;
 // Pull the FT reference out of any free text (provider description or internal ref).
 const extractFT=t=>{const m=t?String(t).toUpperCase().match(FT_RE):null;return m?m[0]:null;};
 // Zand internal refs look like "D769592590293173_<extra>"; the provider Outgoing Id
@@ -317,8 +318,49 @@ const TYPES=[
   {kw:'OpTransactionHistory',label:'NBF',skip:7,prov:'NBF'},
   {kw:'downloaded-statement',label:'Zand',skip:0,prov:'ZAND'},
 ];
-function detect(name){const m=TYPES.find(t=>name.toLowerCase().includes(t.kw.toLowerCase()));return m?m.label:null;}
+// NBF statements arrive under many filenames and layouts; recognise them by content.
+function nbfLooksLike(content){
+  if(!content)return false;
+  const head=content.slice(0,4000);
+  if(/national bank of fujairah/i.test(head))return true;
+  if(/transaction date/i.test(head)&&/balance/i.test(head))return true;
+  const ftCount=(content.match(FT_RE_G)||[]).length;
+  if(ftCount>=3&&/description/i.test(head)&&/debit/i.test(head)&&/credit/i.test(head))return true;
+  return false;
+}
+// Classify a file: known filename keyword first, then "nbf" in the name, then NBF content sniff.
+function classify(name,content){
+  const m=TYPES.find(t=>name.toLowerCase().includes(t.kw.toLowerCase()));
+  if(m)return m.label;
+  if(/\bnbf\b/i.test(name))return 'NBF';
+  if(nbfLooksLike(content))return 'NBF';
+  return null;
+}
+function detect(name){return classify(name,(FILES[name]||{}).content||'');}
 function rowsForType(t){let out=[];pickAll(t.kw).forEach(f=>{out=out.concat(toObjects(f.content,t.skip));});return out;}
+
+// All loaded files classified as NBF (by keyword or content).
+function nbfFiles(){return Object.values(FILES).filter(f=>classify(f.name,f.content)==='NBF');}
+// Locate the header row (skipping any metadata preamble) and return {H, rows}.
+function nbfParse(content){
+  const all=parseCSV(content);let hi=-1;
+  for(let i=0;i<Math.min(all.length,30);i++){
+    const cells=all[i].map(c=>(c||'').trim().toLowerCase());
+    const hasDesc=cells.some(c=>c.includes('description'));
+    const hasCols=cells.some(c=>c==='date'||c.includes('transaction date'))||cells.some(c=>c.includes('debit')||c.includes('credit'));
+    if(hasDesc&&hasCols){hi=i;break;}
+  }
+  if(hi<0)hi=0;
+  const H=all[hi].map(h=>(h||'').replace(/\s+/g,' ').trim());
+  const rows=[];
+  for(let r=hi+1;r<all.length;r++){const c=all[r];if(c.length===1&&!(c[0]||'').trim())continue;
+    const o={};H.forEach((h,i)=>o[h]=(c[i]??'').trim());o.__cells=c;rows.push(o);}
+  return {H,rows};
+}
+const nbfDescCol=H=>H.find(h=>/description/i.test(h))||'';
+const nbfDateCol=H=>H.find(h=>/transaction date/i.test(h))||H.find(h=>/^date$/i.test(h))||H.find(h=>/date/i.test(h))||'';
+// Rows that aren't real transactions.
+const NBF_SKIP=/computer generated|balance brought forward|balance carried forward|opening balance|closing balance|import in progress/i;
 
 // ---------- date-column detection ----------
 function dateCols(rows){
@@ -357,7 +399,8 @@ window.onMapChange=id=>{
 function renderMapping(){
   const panel=document.getElementById('mapping');
   const internalPresent=!!pick('recon-lines');
-  const provTypes=TYPES.filter(t=>t.prov&&pickAll(t.kw).length);
+  // NBF handled separately (auto-detected), so exclude its keyword type from the dropdown loop.
+  const provTypes=TYPES.filter(t=>t.prov&&t.prov!=='NBF'&&pickAll(t.kw).length);
   if(!internalPresent){panel.classList.remove('show');panel.innerHTML='';return;}
   let cells='';
   // internal — two date roles
@@ -373,7 +416,18 @@ function renderMapping(){
     const def=preferCol(cols,/value|settl|complet|post|paid|txn|transaction|date/i);
     cells+=buildSelect('map-date-'+t.kw,t.label+' · date',cols,rows,def);
   });
-  panel.innerHTML=`<h3>Date column mapping <span class="mono-note">— verify these; the January split depends on them</span></h3><div class="mapgrid">${cells}</div>`;
+  // NBF — date column auto-detected per file (layouts vary); show what was picked.
+  const nf=nbfFiles();let nbfInfo='';
+  nf.forEach(f=>{
+    const {H,rows}=nbfParse(f.content);
+    const dt=nbfDateCol(H),d=firstSample(rows,dt);
+    const bad=NBF_SKIP.test(f.content)&&/import in progress/i.test(f.content);
+    nbfInfo+=`<div class="mapcell"><label>NBF · ${esc(f.name)}</label>
+      <div class="sample${d?'':' bad'}">date: “${esc(dt||'—')}”${d?` · e.g. ${fmtDate(d)} ✓`:' ⚠ not parsed'} · ${rows.length} rows</div>
+      ${bad?'<div class="sample bad">⚠ file appears incomplete (contains an “import in progress” marker)</div>':''}</div>`;
+  });
+  const nbfBlock=nf.length?`<h3 style="margin-top:18px">NBF sources <span class="mono-note">— auto-detected</span></h3><div class="mapgrid">${nbfInfo}</div>`:'';
+  panel.innerHTML=`<h3>Date column mapping <span class="mono-note">— verify these; the January split depends on them</span></h3><div class="mapgrid">${cells}</div>${nbfBlock}`;
   panel.classList.add('show');
 }
 function readMap(){
@@ -409,13 +463,15 @@ function analyze(focus){
   addCorpay('PaymentHistory','Amount',false,'Payments');
   addCorpay('SettlementReport','Settlement Amount',true,'Settlements');
   addCorpay('DealHistory','Purchased',false,'FX');
+  // NBF — any file classified as NBF; header row, description column and date column
+  // are auto-detected per file so the various NBF export layouts all work.
   const nbf=[];
-  pickAll('OpTransactionHistory').forEach(f=>{
-    const rows=toObjects(f.content,7);
-    const dk=Object.keys(rows[0]||{}).find(k=>k.indexOf('Description')>=0)||'';
-    rows.forEach(r=>{const desc=r[dk]||'';if(desc.toLowerCase().indexOf('computer generated')>=0)return;
-      const ft=extractFT(desc);if(!ft)return;
-      nbf.push({prov:'NBF',key:ft,date:parseDate(r[MAP.date['OpTransactionHistory']]),matched:false});});
+  nbfFiles().forEach(f=>{
+    const {H,rows}=nbfParse(f.content);
+    const dcol=nbfDescCol(H),dtcol=nbfDateCol(H);
+    rows.forEach(r=>{const desc=r[dcol]||'';if(NBF_SKIP.test(desc))return;
+      const ft=extractFT(desc)||extractFT((r.__cells||[]).join(' '));if(!ft)return;
+      nbf.push({prov:'NBF',key:ft,date:parseDate(r[dtcol]),matched:false});});
   });
   const zand=[];
   pickAll('downloaded-statement').forEach(f=>toObjects(f.content,0).forEach(r=>{
@@ -471,7 +527,9 @@ function analyze(focus){
     matched:matchedAll.filter(o=>o.prov===p).length,
     exceptions:excAll.filter(o=>o.prov===p).length}));
 
-  return {focus,prev,next,cleanJan,missP,missI,ovPrev,ovNext,other,undated,
+  const nbfIncomplete=nbfFiles().filter(f=>/import in progress/i.test(f.content)).map(f=>f.name);
+
+  return {focus,prev,next,cleanJan,missP,missI,ovPrev,ovNext,other,undated,nbfIncomplete,
     perProvider,internalCount:internal.length,matchedAll:matchedAll.length,excAll:excAll.length};
 }
 
@@ -539,6 +597,7 @@ function render(R){
   document.getElementById('overall-note').textContent=`Internal rows ${R.internalCount} · matched ${R.matchedAll} · exceptions ${R.excAll} · match rate ${rate}% (all loaded months).`;
 
   const cav=[];
+  if(R.nbfIncomplete&&R.nbfIncomplete.length) cav.push(`⚠ NBF file(s) ${R.nbfIncomplete.join(', ')} look INCOMPLETE (contain an "import in progress" marker) — missing transactions will show as false exceptions. Replace with the full export before trusting the numbers.`);
   if(R.undated) cav.push(`${R.undated} unmatched provider record(s) had no parseable date and were excluded from the "missing in internal" count — check the date mapping.`);
   cav.push('Amount matches ignore sign (a debit of 100 matches a credit of 100). Reference matching is exact after the documented normalisation.');
   document.getElementById('caveats').textContent='Note — '+cav.join(' ');
